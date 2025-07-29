@@ -1,0 +1,29 @@
+{
+  "name": "Learnline AI Tutor",
+  "short_name": "Learnline",
+  "description": "Interactive voice AI tutor for Class 9 Science NCERT curriculum",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#2563eb",
+  "orientation": "portrait",
+  "categories": ["education", "productivity"],
+  "lang": "en",
+  "scope": "/",
+  "prefer_related_applications": false,
+  "display_override": ["standalone", "minimal-ui"],
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "maskable any"
+    },
+    {
+      "src": "/icon-192.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable any"
+    }
+  ]
+}

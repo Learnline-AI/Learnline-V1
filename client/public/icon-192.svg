@@ -1,0 +1,14 @@
+<svg width="192" height="192" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="32" fill="url(#grad)"/>
+  <g transform="translate(48,48)">
+    <circle cx="48" cy="48" r="36" fill="none" stroke="white" stroke-width="4"/>
+    <path d="M30 48 L42 60 L66 36" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="96" y="160" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="20" font-weight="bold">Learnline</text>
+</svg>

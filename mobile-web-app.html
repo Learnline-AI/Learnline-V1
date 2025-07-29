@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Teacher - Ravi Bhaiya</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #F8F9FA 0%, #E9ECEF 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%);
+            color: white;
+            padding: 60px 20px 20px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(255, 107, 53, 0.3);
+        }
+        
+        .avatar {
+            width: 80px;
+            height: 80px;
+            background: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            margin: 0 auto 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+        
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+        
+        .lang-toggle {
+            position: absolute;
+            top: 70px;
+            right: 20px;
+            background: white;
+            color: #FF6B35;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .chat-container {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            max-height: calc(100vh - 300px);
+        }
+        
+        .message {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: flex-start;
+        }
+        
+        .message.student {
+            justify-content: flex-end;
+        }
+        
+        .message-bubble {
+            max-width: 85%;
+            padding: 16px 20px;
+            border-radius: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+        
+        .message.student .message-bubble {
+            background: linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%);
+            color: white;
+            border-bottom-right-radius: 6px;
+        }
+        
+        .message.ai .message-bubble {
+            background: white;
+            color: #333;
+            border-bottom-left-radius: 6px;
+        }
+        
+        .voice-section {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            padding: 20px;
+            border-top-left-radius: 25px;
+            border-top-right-radius: 25px;
+            box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+        
+        .voice-button {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%);
+            border: none;
+            color: white;
+            font-size: 32px;
+            cursor: pointer;
+            box-shadow: 0 4px 20px rgba(255, 107, 53, 0.3);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .voice-button:active {
+            transform: scale(0.95);
+        }
+        
+        .voice-button.recording {
+            background: linear-gradient(135deg, #FF3B30 0%, #FF6B6B 100%);
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        
+        .voice-hint {
+            margin-top: 12px;
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .error-message {
+            background: #FFE5E5;
+            color: #D63031;
+            padding: 12px 20px;
+            border-radius: 12px;
+            margin: 10px 20px;
+            text-align: center;
+            border: 1px solid #FF6B6B;
+        }
+        
+        .typing-indicator {
+            display: flex;
+            justify-content: flex-start;
+            margin-bottom: 20px;
+            padding: 0 20px;
+        }
+        
+        .typing-bubble {
+            background: white;
+            padding: 16px 20px;
+            border-radius: 20px;
+            border-bottom-left-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+        
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #FF6B35;
+            animation: typing 1.4s infinite;
+        }
+        
+        .dot:nth-child(2) { animation-delay: 0.2s; }
+        .dot:nth-child(3) { animation-delay: 0.4s; }
+        
+        @keyframes typing {
+            0%, 60%, 100% { opacity: 0.3; }
+            30% { opacity: 1; }
+        }
+        
+        .wave-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 3px;
+            margin-bottom: 10px;
+            height: 30px;
+        }
+        
+        .wave-bar {
+            width: 4px;
+            background: #FF6B35;
+            border-radius: 2px;
+            animation: wave 0.8s infinite;
+        }
+        
+        .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+        .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+        .wave-bar:nth-child(4) { animation-delay: 0.3s; }
+        .wave-bar:nth-child(5) { animation-delay: 0.4s; }
+        
+        @keyframes wave {
+            0%, 100% { height: 6px; }
+            50% { height: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <button class="lang-toggle" onclick="toggleLanguage()">EN</button>
+        <div class="avatar">🧑‍🏫</div>
+        <h1 id="teacher-name">रवि भाई</h1>
+        <p id="teacher-subtitle">Class 9 Science शिक्षक</p>
+    </div>
+    
+    <div class="chat-container" id="chat-container">
+        <div class="message ai">
+            <div class="message-bubble">
+                <p id="welcome-message">नमस्ते! मैं रवि भाई हूँ, आपका AI शिक्षक। Class 9 Science के बारे में कोई भी सवाल पूछिए!</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="voice-section">
+        <div class="wave-container" id="wave-container" style="display: none;">
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+        </div>
+        <button class="voice-button" id="voice-button" onclick="toggleRecording()">🎤</button>
+        <p class="voice-hint" id="voice-hint">बोलने के लिए दबाएं</p>
+    </div>
+    
+    <script>
+        let isRecording = false;
+        let isTyping = false;
+        let currentLanguage = 'hindi';
+        let recognition;
+        
+        const API_BASE = window.location.origin;
+        
+        // Initialize speech recognition
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            recognition.lang = 'hi-IN';
+        } else if ('SpeechRecognition' in window) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            recognition.lang = 'hi-IN';
+        }
+        
+        function toggleLanguage() {
+            currentLanguage = currentLanguage === 'hindi' ? 'english' : 'hindi';
+            const toggle = document.querySelector('.lang-toggle');
+            const teacherName = document.getElementById('teacher-name');
+            const teacherSubtitle = document.getElementById('teacher-subtitle');
+            const welcomeMessage = document.getElementById('welcome-message');
+            const voiceHint = document.getElementById('voice-hint');
+            
+            if (currentLanguage === 'hindi') {
+                toggle.textContent = 'EN';
+                teacherName.textContent = 'रवि भाई';
+                teacherSubtitle.textContent = 'Class 9 Science शिक्षक';
+                welcomeMessage.textContent = 'नमस्ते! मैं रवि भाई हूँ, आपका AI शिक्षक। Class 9 Science के बारे में कोई भी सवाल पूछिए!';
+                voiceHint.textContent = 'बोलने के लिए दबाएं';
+                if (recognition) recognition.lang = 'hi-IN';
+            } else {
+                toggle.textContent = 'हिं';
+                teacherName.textContent = 'Ravi Bhaiya';
+                teacherSubtitle.textContent = 'Class 9 Science Teacher';
+                welcomeMessage.textContent = 'Hello! I am Ravi Bhaiya, your AI teacher. Ask me anything about Class 9 Science!';
+                voiceHint.textContent = 'Tap to speak';
+                if (recognition) recognition.lang = 'en-IN';
+            }
+        }
+        
+        function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+        
+        function startRecording() {
+            if (!recognition) {
+                showError(currentLanguage === 'hindi' 
+                    ? 'आपका ब्राउज़र voice recognition को support नहीं करता'
+                    : 'Your browser does not support voice recognition');
+                return;
+            }
+            
+            isRecording = true;
+            const button = document.getElementById('voice-button');
+            const hint = document.getElementById('voice-hint');
+            const waveContainer = document.getElementById('wave-container');
+            
+            button.classList.add('recording');
+            waveContainer.style.display = 'flex';
+            hint.textContent = currentLanguage === 'hindi' ? 'सुन रहा हूँ...' : 'Listening...';
+            
+            recognition.onresult = function(event) {
+                const transcript = event.results[0][0].transcript;
+                handleSpeechResult(transcript);
+            };
+            
+            recognition.onerror = function(event) {
+                console.error('Speech recognition error:', event.error);
+                showError(currentLanguage === 'hindi' 
+                    ? 'मैं आपकी आवाज़ समझ नहीं सका। कृपया धीरे और स्पष्ट बोलें।'
+                    : 'I could not understand your speech. Please speak slowly and clearly.');
+                stopRecording();
+            };
+            
+            recognition.onend = function() {
+                stopRecording();
+            };
+            
+            recognition.start();
+        }
+        
+        function stopRecording() {
+            isRecording = false;
+            const button = document.getElementById('voice-button');
+            const hint = document.getElementById('voice-hint');
+            const waveContainer = document.getElementById('wave-container');
+            
+            button.classList.remove('recording');
+            waveContainer.style.display = 'none';
+            hint.textContent = currentLanguage === 'hindi' ? 'बोलने के लिए दबाएं' : 'Tap to speak';
+            
+            if (recognition) {
+                recognition.stop();
+            }
+        }
+        
+        function handleSpeechResult(transcript) {
+            addMessage(transcript, 'student');
+            getAIResponse(transcript);
+        }
+        
+        function addMessage(content, type) {
+            const chatContainer = document.getElementById('chat-container');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            messageDiv.innerHTML = `
+                <div class="message-bubble">
+                    <p>${content}</p>
+                </div>
+            `;
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        function showTypingIndicator() {
+            const chatContainer = document.getElementById('chat-container');
+            const typingDiv = document.createElement('div');
+            typingDiv.className = 'typing-indicator';
+            typingDiv.id = 'typing-indicator';
+            
+            typingDiv.innerHTML = `
+                <div class="typing-bubble">
+                    <div class="typing-dots">
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                    </div>
+                </div>
+            `;
+            
+            chatContainer.appendChild(typingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        function hideTypingIndicator() {
+            const typingIndicator = document.getElementById('typing-indicator');
+            if (typingIndicator) {
+                typingIndicator.remove();
+            }
+        }
+        
+        async function getAIResponse(question) {
+            showTypingIndicator();
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/ask-teacher`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        question: question,
+                        language: currentLanguage
+                    })
+                });
+                
+                const data = await response.json();
+                hideTypingIndicator();
+                
+                if (data.success) {
+                    addMessage(data.answer, 'ai');
+                } else {
+                    showError(data.error || 'कुछ समस्या आई है। कृपया दोबारा पूछें।');
+                }
+            } catch (error) {
+                hideTypingIndicator();
+                showError(currentLanguage === 'hindi' 
+                    ? 'कनेक्शन में समस्या। कृपया दोबारा कोशिश करें।'
+                    : 'Connection error. Please try again.');
+            }
+        }
+        
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error-message';
+            errorDiv.textContent = message;
+            
+            document.body.appendChild(errorDiv);
+            
+            setTimeout(() => {
+                errorDiv.remove();
+            }, 3000);
+        }
+    </script>
+</body>
+</html>

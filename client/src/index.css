@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: hsl(0, 0%, 100%);
+  --foreground: hsl(20, 14.3%, 4.1%);
+  --muted: hsl(60, 4.8%, 95.9%);
+  --muted-foreground: hsl(25, 5.3%, 44.7%);
+  --popover: hsl(0, 0%, 100%);
+  --popover-foreground: hsl(20, 14.3%, 4.1%);
+  --card: hsl(0, 0%, 100%);
+  --card-foreground: hsl(20, 14.3%, 4.1%);
+  --border: hsl(20, 5.9%, 90%);
+  --input: hsl(20, 5.9%, 90%);
+  --primary: hsl(207, 90%, 54%);
+  --primary-foreground: hsl(211, 100%, 99%);
+  --secondary: hsl(187, 91%, 44%);
+  --secondary-foreground: hsl(211, 100%, 99%);
+  --accent: hsl(158, 77%, 37%);
+  --accent-foreground: hsl(211, 100%, 99%);
+  --destructive: hsl(0, 84.2%, 60.2%);
+  --destructive-foreground: hsl(60, 9.1%, 97.8%);
+  --ring: hsl(20, 14.3%, 4.1%);
+  --radius: 0.5rem;
+  --chart-1: hsl(207, 90%, 54%);
+  --chart-2: hsl(187, 91%, 44%);
+  --chart-3: hsl(158, 77%, 37%);
+  --chart-4: hsl(43, 96%, 56%);
+  --chart-5: hsl(0, 84.2%, 60.2%);
+}
+
+.dark {
+  --background: hsl(240, 10%, 3.9%);
+  --foreground: hsl(0, 0%, 98%);
+  --muted: hsl(240, 3.7%, 15.9%);
+  --muted-foreground: hsl(240, 5%, 64.9%);
+  --popover: hsl(240, 10%, 3.9%);
+  --popover-foreground: hsl(0, 0%, 98%);
+  --card: hsl(240, 10%, 3.9%);
+  --card-foreground: hsl(0, 0%, 98%);
+  --border: hsl(240, 3.7%, 15.9%);
+  --input: hsl(240, 3.7%, 15.9%);
+  --primary: hsl(207, 90%, 54%);
+  --primary-foreground: hsl(211, 100%, 99%);
+  --secondary: hsl(187, 91%, 44%);
+  --secondary-foreground: hsl(211, 100%, 99%);
+  --accent: hsl(158, 77%, 37%);
+  --accent-foreground: hsl(211, 100%, 99%);
+  --destructive: hsl(0, 62.8%, 30.6%);
+  --destructive-foreground: hsl(0, 0%, 98%);
+  --ring: hsl(240, 4.9%, 83.9%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Custom animations for voice interactions */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+@keyframes voice-wave {
+  0%, 100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(1.5);
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+.animate-voice-wave {
+  animation: voice-wave 0.6s ease-in-out infinite alternate;
+}
+
+/* Mobile-specific styles for iOS and Android */
+@media (max-width: 768px) {
+  .max-w-md {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+}
+
+/* Safe area handling for notched devices */
+.safe-area-top {
+  padding-top: max(env(safe-area-inset-top), 0px);
+}
+
+.safe-area-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+
+.pb-safe {
+  padding-bottom: max(env(safe-area-inset-bottom), 80px);
+}
+
+/* Ensure proper scrolling on mobile */
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* Touch optimization */
+.touch-manipulation {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Voice button effects */
+.voice-button-hover:hover {
+  transform: scale(1.05);
+  transition: transform 0.2s ease;
+}
+
+.voice-button-active:active {
+  transform: scale(0.95);
+  transition: transform 0.1s ease;
+}
+
+/* iOS specific fixes */
+@supports (-webkit-appearance: none) {
+  input[type="text"],
+  input[type="password"],
+  textarea {
+    -webkit-appearance: none;
+    border-radius: 0;
+  }
+}
+
+/* Android specific fixes */
+@media screen and (-webkit-min-device-pixel-ratio: 1) {
+  select,
+  textarea,
+  input[type="text"],
+  input[type="password"] {
+    font-size: 16px;
+  }
+}
+
+/* Prevent horizontal scroll */
+html, body {
+  overflow-x: hidden;
+  width: 100%;
+}
+
+/* Enhanced button touch targets */
+button {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Improved tap targets for mobile */
+.tap-target {
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
