@@ -118,6 +118,12 @@ export class ConversationVAD extends EventEmitter {
   // Audio processing state
   private currentSpeechSegment: Float32Array[] = [];
   
+  // Pre-buffer for capturing audio before VAD triggers
+  private preBuffer: Float32Array[] = [];
+  private preBufferDuration: number = 0.7; // 0.7 seconds of pre-buffer
+  private preBufferMaxSamples: number;
+  private preBufferSamples: number = 0;
+  
   // Performance tracking
   private vadStats = {
     sileroSuccess: 0,
@@ -133,6 +139,9 @@ export class ConversationVAD extends EventEmitter {
     super();
     this.config = { ...DEFAULT_VAD_CONFIG, ...config };
     
+    // Initialize pre-buffer settings
+    this.preBufferMaxSamples = Math.floor(this.config.sampleRate * this.preBufferDuration);
+    
     console.log('🎤 ConversationVAD initialized with enhanced config:', {
       provider: this.config.provider,
       model: this.config.model,
@@ -140,6 +149,8 @@ export class ConversationVAD extends EventEmitter {
       negativeSpeechThreshold: this.config.negativeSpeechThreshold,
       customVADEnabled: this.config.customVADEnabled,
       rnnoiseEnabled: this.config.rnnoiseEnabled,
+      preBufferDuration: this.preBufferDuration,
+      preBufferMaxSamples: this.preBufferMaxSamples,
       debug: VAD_DEBUG
     });
   }
@@ -239,6 +250,9 @@ export class ConversationVAD extends EventEmitter {
 
     // 🎤 RNNOISE VOICE ISOLATION - Process audio before VAD
     const { enhancedAudio, rnnoiseDebugInfo } = await this.processWithRNNoise(float32Audio);
+    
+    // Add enhanced audio to rolling pre-buffer (always running)
+    this.addToPreBuffer(enhancedAudio);
     
     // Add enhanced audio to buffer for speech collection
     this.audioBuffer.push(enhancedAudio);
@@ -507,12 +521,12 @@ export class ConversationVAD extends EventEmitter {
     if (probability > this.config.positiveSpeechThreshold) {
       // Speech detected
       if (!wasSpeaking) {
-        // Speech start
+        // Speech start - prepend pre-buffer to capture audio before VAD trigger
         this.speechStartTime = timestamp;
-        this.currentSpeechSegment = [];
+        this.currentSpeechSegment = [...this.getPreBufferAudio()]; // Start with pre-buffer
         this.setState('listening');
         eventType = 'speech_start';
-        console.log(`🎤 ${provider} VAD: Speech started (prob=${probability.toFixed(3)})`);
+        console.log(`🎤 ${provider} VAD: Speech started (prob=${probability.toFixed(3)}) - Pre-buffer: ${this.preBufferSamples} samples (${(this.preBufferSamples/this.config.sampleRate*1000).toFixed(0)}ms)`);
       } else {
         // Continuing speech - collect audio chunk
         this.currentSpeechSegment.push(audioData);
@@ -617,6 +631,27 @@ export class ConversationVAD extends EventEmitter {
   clearBuffer() {
     this.audioBuffer = [];
     this.currentSpeechSegment = [];
+    this.preBuffer = [];
+    this.preBufferSamples = 0;
+  }
+  
+  // Add audio to pre-buffer (always running)
+  private addToPreBuffer(audioData: Float32Array) {
+    this.preBuffer.push(audioData);
+    this.preBufferSamples += audioData.length;
+    
+    // Keep only the last 0.7 seconds of audio
+    while (this.preBufferSamples > this.preBufferMaxSamples) {
+      const oldestChunk = this.preBuffer.shift();
+      if (oldestChunk) {
+        this.preBufferSamples -= oldestChunk.length;
+      }
+    }
+  }
+  
+  // Get pre-buffer audio when speech starts
+  private getPreBufferAudio(): Float32Array[] {
+    return [...this.preBuffer]; // Return a copy
   }
 
   getCurrentState(): ConversationState {
