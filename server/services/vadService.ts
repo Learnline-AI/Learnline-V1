@@ -1,6 +1,16 @@
-// vadService.ts - Enhanced VAD service with Silero ONNX and Custom VAD fallback
+// vadService.ts - Enhanced VAD service with RNNoise + Silero ONNX and Custom VAD fallback
 import { EventEmitter } from 'events';
 import { SileroONNXVAD, createSileroVAD, type SileroVADResult } from './sileroVAD';
+import { getRNNoiseService, type RNNoiseService } from './rnnoiseService';
+import { 
+  convertPCM16ToFloat32_48kHz, 
+  convertFloat32ToPCM16_16kHz,
+  resampleFloat32_16to48kHz,
+  resampleFloat32_48to16kHz,
+  analyzeAudio,
+  validateAudioData,
+  type AudioConversionStats 
+} from './audioProcessing';
 
 // VAD Provider Types
 type VADProvider = 'silero' | 'custom' | 'auto';
@@ -9,10 +19,17 @@ type VADProvider = 'silero' | 'custom' | 'auto';
 const VAD_PROVIDER = (process.env.VAD_PROVIDER as VADProvider) || 'auto';
 const VAD_DEBUG = process.env.VAD_DEBUG === 'true';
 
-// Enhanced VAD Configuration supporting both Silero ONNX and Custom VAD
+// RNNoise configuration from environment
+const RNNOISE_ENABLED = process.env.RNNOISE_ENABLED !== 'false'; // Default enabled
+const RNNOISE_DEBUG = process.env.RNNOISE_DEBUG === 'true';
+
+// Enhanced VAD Configuration supporting RNNoise + Silero ONNX and Custom VAD
 interface VADConfig {
   sampleRate: number;
   provider: VADProvider;
+  // RNNoise voice isolation settings
+  rnnoiseEnabled: boolean;
+  rnnoiseDebug: boolean;
   // Silero VAD specific settings
   model: "v5" | "legacy";
   positiveSpeechThreshold: number;
@@ -32,6 +49,9 @@ interface VADConfig {
 const DEFAULT_VAD_CONFIG: VADConfig = {
   sampleRate: 16000,
   provider: VAD_PROVIDER,
+  // RNNoise voice isolation settings
+  rnnoiseEnabled: RNNOISE_ENABLED,
+  rnnoiseDebug: RNNOISE_DEBUG,
   // Silero VAD settings (optimized for Hindi/English)
   model: "v5",
   positiveSpeechThreshold: 0.5,
@@ -65,6 +85,15 @@ export interface VADEvent {
         activity: number;
         probability: number;
       };
+      rnnoiseResult?: {
+        enabled: boolean;
+        processed: boolean;
+        processingTime: number;
+        provider: string | null;
+        inputStats: AudioConversionStats;
+        outputStats: AudioConversionStats;
+        errorMessage?: string;
+      };
       fallbackUsed?: boolean;
     };
   };
@@ -79,6 +108,9 @@ export class ConversationVAD extends EventEmitter {
   private isInitialized = false;
   private isMounted = true;
   
+  // RNNoise service instance
+  private rnnoiseService: RNNoiseService | null = null;
+  
   // VAD Provider instances
   private sileroVAD: SileroONNXVAD | null = null;
   private currentProvider: VADProvider = 'custom';
@@ -92,6 +124,9 @@ export class ConversationVAD extends EventEmitter {
     sileroErrors: 0,
     customFallbacks: 0,
     totalProcessed: 0,
+    rnnoiseSuccess: 0,
+    rnnoiseErrors: 0,
+    rnnoiseSkipped: 0,
   };
 
   constructor(config: Partial<VADConfig> = {}) {
@@ -104,6 +139,7 @@ export class ConversationVAD extends EventEmitter {
       positiveSpeechThreshold: this.config.positiveSpeechThreshold,
       negativeSpeechThreshold: this.config.negativeSpeechThreshold,
       customVADEnabled: this.config.customVADEnabled,
+      rnnoiseEnabled: this.config.rnnoiseEnabled,
       debug: VAD_DEBUG
     });
   }
@@ -112,9 +148,30 @@ export class ConversationVAD extends EventEmitter {
     if (this.isInitialized) return;
 
     try {
-      console.log('🔧 Initializing Enhanced VAD service...');
+      console.log('🔧 Initializing Enhanced VAD service with RNNoise voice isolation...');
       
-      // Try to initialize Silero ONNX VAD first
+      // Initialize RNNoise service first (if enabled)
+      if (this.config.rnnoiseEnabled) {
+        try {
+          console.log('🎤 RNNoise: Initializing voice isolation...');
+          this.rnnoiseService = getRNNoiseService();
+          await this.rnnoiseService.initialize();
+          
+          if (this.rnnoiseService.isServiceEnabled()) {
+            console.log(`✅ RNNoise: Voice isolation active with provider: ${this.rnnoiseService.getActiveProvider()}`);
+          } else {
+            console.log('⚠️ RNNoise: Voice isolation disabled, continuing with standard VAD');
+          }
+        } catch (error) {
+          console.warn('⚠️ RNNoise: Initialization failed, continuing without voice isolation:', error);
+          this.rnnoiseService = null;
+          this.vadStats.rnnoiseErrors++;
+        }
+      } else {
+        console.log('🎤 RNNoise: Voice isolation disabled via configuration');
+      }
+      
+      // Try to initialize Silero ONNX VAD
       if (this.config.provider === 'silero' || this.config.provider === 'auto') {
         try {
           this.sileroVAD = createSileroVAD({
@@ -179,14 +236,121 @@ export class ConversationVAD extends EventEmitter {
       console.warn('⚠️ Empty audio chunk received');
       return null;
     }
-    
-    // Add to buffer for speech collection
-    this.audioBuffer.push(float32Audio);
 
-    // Process with primary VAD provider
-    const vadResult = await this.processWithActiveVAD(float32Audio, timestamp);
+    // 🎤 RNNOISE VOICE ISOLATION - Process audio before VAD
+    const { enhancedAudio, rnnoiseDebugInfo } = await this.processWithRNNoise(float32Audio);
     
-    return this.handleVADResult(vadResult, float32Audio, timestamp);
+    // Add enhanced audio to buffer for speech collection
+    this.audioBuffer.push(enhancedAudio);
+
+    // Process with primary VAD provider using enhanced audio
+    const vadResult = await this.processWithActiveVAD(enhancedAudio, timestamp);
+    
+    // Include RNNoise debug info in VAD result
+    vadResult.debug = {
+      ...vadResult.debug,
+      rnnoiseResult: rnnoiseDebugInfo
+    };
+    
+    return this.handleVADResult(vadResult, enhancedAudio, timestamp);
+  }
+
+  /**
+   * Process audio with RNNoise voice isolation
+   * Returns enhanced audio and debug information
+   */
+  private async processWithRNNoise(audioData: Float32Array): Promise<{
+    enhancedAudio: Float32Array;
+    rnnoiseDebugInfo: any;
+  }> {
+    const startTime = performance.now();
+    
+    // Initialize debug info
+    let rnnoiseDebugInfo = {
+      enabled: this.config.rnnoiseEnabled,
+      processed: false,
+      processingTime: 0,
+      provider: this.rnnoiseService?.getActiveProvider() || null,
+      inputStats: {} as AudioConversionStats,
+      outputStats: {} as AudioConversionStats,
+      errorMessage: undefined as string | undefined
+    };
+
+    // Return original audio if RNNoise is disabled or unavailable
+    if (!this.config.rnnoiseEnabled || !this.rnnoiseService || !this.rnnoiseService.isServiceEnabled()) {
+      rnnoiseDebugInfo.processingTime = performance.now() - startTime;
+      
+      if (!this.config.rnnoiseEnabled) {
+        if (this.config.rnnoiseDebug) {
+          console.log('🎤 RNNoise: Skipped - disabled via configuration');
+        }
+      } else if (!this.rnnoiseService) {
+        console.warn('⚠️ RNNoise: Service not initialized, using original audio');
+      } else {
+        console.warn('⚠️ RNNoise: Service disabled due to errors, using original audio');
+      }
+      
+      this.vadStats.rnnoiseSkipped++;
+      return { enhancedAudio: audioData, rnnoiseDebugInfo };
+    }
+
+    try {
+      // Validate input audio
+      const validation = validateAudioData(audioData, 'Float32@16kHz');
+      if (!validation.isValid) {
+        console.warn('⚠️ RNNoise: Invalid input audio data:', validation.issues);
+        rnnoiseDebugInfo.errorMessage = `Invalid input: ${validation.issues.join(', ')}`;
+        this.vadStats.rnnoiseErrors++;
+        return { enhancedAudio: audioData, rnnoiseDebugInfo };
+      }
+
+      // Convert 16kHz Float32 to 48kHz Float32 for RNNoise
+      const { audio: audio48k, stats: inputStats } = resampleFloat32_16to48kHz(audioData);
+      rnnoiseDebugInfo.inputStats = inputStats;
+
+      if (this.config.rnnoiseDebug && Math.random() < 0.1) {
+        console.log(`🔧 RNNoise: Processing ${inputStats.inputSamples} samples (16kHz) → ${inputStats.outputSamples} samples (48kHz)`);
+      }
+
+      // Process with RNNoise
+      const processedAudio48k = await this.rnnoiseService.processAudio(audio48k);
+      
+      // Convert back from 48kHz to 16kHz
+      const { audio: enhancedAudio16k, stats: outputStats } = resampleFloat32_48to16kHz(processedAudio48k);
+      rnnoiseDebugInfo.outputStats = outputStats;
+
+      // Calculate processing time
+      rnnoiseDebugInfo.processingTime = performance.now() - startTime;
+      rnnoiseDebugInfo.processed = true;
+      
+      // Update success stats
+      this.vadStats.rnnoiseSuccess++;
+
+      if (this.config.rnnoiseDebug && Math.random() < 0.05) { // Debug 5% of requests
+        const inputAnalysis = analyzeAudio(audioData, 'Float32@16kHz');
+        const outputAnalysis = analyzeAudio(enhancedAudio16k, 'Float32@16kHz');
+        
+        console.log(`✅ RNNoise: Audio enhanced successfully - Time: ${rnnoiseDebugInfo.processingTime.toFixed(2)}ms, Provider: ${rnnoiseDebugInfo.provider}`);
+        console.log(`   Input:  RMS=${inputAnalysis.rmsLevel.toFixed(4)}, Peak=${inputAnalysis.peakLevel.toFixed(4)}, Silence=${(inputAnalysis.silenceRatio*100).toFixed(1)}%`);
+        console.log(`   Output: RMS=${outputAnalysis.rmsLevel.toFixed(4)}, Peak=${outputAnalysis.peakLevel.toFixed(4)}, Silence=${(outputAnalysis.silenceRatio*100).toFixed(1)}%`);
+      }
+
+      return { enhancedAudio: enhancedAudio16k, rnnoiseDebugInfo };
+
+    } catch (error) {
+      const processingTime = performance.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown RNNoise error';
+      
+      console.warn(`⚠️ RNNoise: Processing failed (${processingTime.toFixed(2)}ms):`, errorMessage);
+      
+      // Update error stats
+      this.vadStats.rnnoiseErrors++;
+      rnnoiseDebugInfo.processingTime = processingTime;
+      rnnoiseDebugInfo.errorMessage = errorMessage;
+
+      // Graceful fallback - return original audio
+      return { enhancedAudio: audioData, rnnoiseDebugInfo };
+    }
   }
   
   private convertPCM16ToFloat32(audioData: Buffer): Float32Array {
@@ -500,7 +664,11 @@ export class ConversationVAD extends EventEmitter {
       ...this.vadStats,
       currentProvider: this.currentProvider,
       sileroReady: this.sileroVAD?.isReady() || false,
-      sileroStateInfo: this.sileroVAD?.getStateInfo() || null
+      sileroStateInfo: this.sileroVAD?.getStateInfo() || null,
+      rnnoiseEnabled: this.config.rnnoiseEnabled,
+      rnnoiseServiceEnabled: this.rnnoiseService?.isServiceEnabled() || false,
+      rnnoiseActiveProvider: this.rnnoiseService?.getActiveProvider() || null,
+      rnnoiseServiceStats: this.rnnoiseService?.getStats() || null
     };
   }
   
@@ -519,12 +687,19 @@ export class ConversationVAD extends EventEmitter {
     this.clearBuffer();
     this.removeAllListeners();
     
+    // Cleanup Silero VAD
     if (this.sileroVAD) {
       await this.sileroVAD.destroy();
       this.sileroVAD = null;
     }
     
-    console.log('🧹 Enhanced VAD service destroyed');
+    // Cleanup RNNoise service (shared instance, so don't destroy globally)
+    if (this.rnnoiseService) {
+      // Just null the reference - the service is managed globally
+      this.rnnoiseService = null;
+    }
+    
+    console.log('🧹 Enhanced VAD service destroyed (with RNNoise integration)');
   }
 }
 
@@ -538,12 +713,15 @@ export function getOptimalVADConfig(scenario: {
   language?: 'hindi' | 'english' | 'mixed';
   environment?: 'quiet' | 'noisy' | 'variable';
   sensitivity?: 'low' | 'medium' | 'high';
+  rnnoiseEnabled?: boolean;
 }): Partial<VADConfig> {
-  const { language = 'mixed', environment = 'variable', sensitivity = 'medium' } = scenario;
+  const { language = 'mixed', environment = 'variable', sensitivity = 'medium', rnnoiseEnabled = true } = scenario;
   
   let config: Partial<VADConfig> = {
     provider: 'auto', // Let system choose best provider
     model: 'v5',
+    rnnoiseEnabled, // Enable RNNoise by default for better noise suppression
+    rnnoiseDebug: false,
   };
   
   // Adjust thresholds based on sensitivity
@@ -575,6 +753,10 @@ export function getOptimalVADConfig(scenario: {
   if (environment === 'noisy') {
     config.positiveSpeechThreshold! += 0.1;
     config.energyThreshold! *= 2;
+    // Enable RNNoise debug for noisy environments to monitor effectiveness
+    if (rnnoiseEnabled) {
+      config.rnnoiseDebug = true;
+    }
   }
   
   return config;

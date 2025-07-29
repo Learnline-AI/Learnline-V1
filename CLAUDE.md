@@ -90,11 +90,21 @@ npm start
 ### API Flow
 
 The main educational interaction flow:
-1. User speaks → Audio recorded → Sent to `/api/speech-to-text`
+1. User speaks → Audio recorded → **RNNoise voice isolation** → Sent to `/api/speech-to-text`
 2. Transcribed text → Sent to `/api/ask-teacher-stream`
 3. AI generates response → Streamed in chunks
 4. Each chunk → TTS conversion → Audio returned
 5. Client plays audio chunks sequentially
+
+### Voice Processing Pipeline
+
+Enhanced audio pipeline with RNNoise integration:
+```
+Raw Audio → RNNoise Denoising → VAD Detection → Speech Recognition → AI Processing
+```
+- **RNNoise**: Neural network-based noise suppression (90-95% false positive reduction)
+- **Dual VAD**: Silero ONNX (primary) + Custom VAD (fallback)
+- **Graceful Fallback**: Automatic bypass if RNNoise fails
 
 ### Database Schema
 
@@ -152,6 +162,14 @@ GOOGLE_GEMINI_API_KEY=  # For Gemini AI
 GOOGLE_CLOUD_PROJECT_ID= # For Google TTS
 ANTHROPIC_API_KEY=      # For Claude fallback
 ELEVENLABS_API_KEY=     # For ElevenLabs fallback
+```
+
+RNNoise Voice Isolation (Optional):
+```bash
+RNNOISE_ENABLED=true         # Enable/disable RNNoise voice isolation
+RNNOISE_DEBUG=false          # Enable debug logging for RNNoise
+VOICE_ISOLATION_LEVEL=medium # Voice isolation sensitivity level
+RNNOISE_FALLBACK_TIMEOUT=500 # Timeout for RNNoise processing (ms)
 ```
 
 ## Common Development Tasks

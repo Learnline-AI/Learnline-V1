@@ -6,6 +6,8 @@ import { ragService } from "./services/ragService";
 import { generateAIResponse, testAIConnection } from "./services/aiService";
 import { generateTTS, detectLanguage } from "./services/ttsService";
 import { AI_CONFIG, SYSTEM_PROMPTS, API_KEYS } from "./config/aiConfig";
+import { getRNNoiseService } from "./services/rnnoiseService";
+import { getErrorMonitoringService } from "./services/errorMonitoring";
 import { ConversationVAD, createVADInstance, getOptimalVADConfig, type VADEvent, type ConversationState } from "./services/vadService";
 import * as fs from "fs";
 import * as path from "path";
@@ -30,6 +32,89 @@ export async function registerRoutes(app: Express): Promise<Server> {
       aiProvider: AI_CONFIG.AI_PROVIDER,
       ttsProvider: AI_CONFIG.TTS_PROVIDER,
     });
+  });
+
+  // RNNoise system health endpoint
+  app.get("/api/health-rnnoise", (req, res) => {
+    try {
+      const errorMonitoring = getErrorMonitoringService();
+      const rnnoiseService = getRNNoiseService();
+      
+      const systemHealth = errorMonitoring.getSystemHealth();
+      const rnnoiseStats = rnnoiseService.getStats();
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        systemHealth,
+        rnnoiseService: {
+          enabled: rnnoiseService.isServiceEnabled(),
+          activeProvider: rnnoiseService.getActiveProvider(),
+          stats: rnnoiseStats
+        },
+        recommendations: systemHealth.recommendations
+      });
+    } catch (error) {
+      console.error('Error getting RNNoise health:', error);
+      res.status(500).json({
+        error: 'Failed to get RNNoise health status',
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // RNNoise diagnostic report endpoint
+  app.get("/api/rnnoise-diagnostics", (req, res) => {
+    try {
+      const errorMonitoring = getErrorMonitoringService();
+      const report = errorMonitoring.generateDiagnosticReport();
+      
+      res.setHeader('Content-Type', 'text/plain');
+      res.send(report);
+    } catch (error) {
+      console.error('Error generating RNNoise diagnostics:', error);
+      res.status(500).json({
+        error: 'Failed to generate diagnostic report',
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // RNNoise error history endpoint
+  app.get("/api/rnnoise-errors", (req, res) => {
+    try {
+      const errorMonitoring = getErrorMonitoringService();
+      const component = req.query.component as string;
+      const limit = parseInt(req.query.limit as string) || 50;
+      
+      let errors;
+      if (component) {
+        errors = errorMonitoring.getComponentErrors(component, limit);
+      } else {
+        errors = errorMonitoring.getUnresolvedErrors().slice(0, limit);
+      }
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        component: component || 'all',
+        errors: errors.map(error => ({
+          id: error.id,
+          timestamp: new Date(error.timestamp).toISOString(),
+          component: error.component,
+          severity: error.severity,
+          errorType: error.errorType,
+          message: error.message,
+          resolved: error.resolved,
+          recoveryAction: error.recoveryAction,
+          context: error.context
+        }))
+      });
+    } catch (error) {
+      console.error('Error getting RNNoise errors:', error);
+      res.status(500).json({
+        error: 'Failed to get error history',
+        timestamp: new Date().toISOString()
+      });
+    }
   });
 
   // Diagnostic endpoint to verify environment variables

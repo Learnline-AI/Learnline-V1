@@ -60,6 +60,15 @@ test_endpoint "GET" "/api/test-google-auth" "" "Test Google Authentication"
 # Test 5: RAG Status
 test_endpoint "GET" "/api/rag/status" "" "RAG Service Status"
 
+# Test 5.1: RNNoise Health Check
+test_endpoint "GET" "/api/health-rnnoise" "" "RNNoise System Health"
+
+# Test 5.2: RNNoise Diagnostics
+test_endpoint "GET" "/api/rnnoise-diagnostics" "" "RNNoise Diagnostic Report"
+
+# Test 5.3: RNNoise Error History
+test_endpoint "GET" "/api/rnnoise-errors?limit=10" "" "RNNoise Error History"
+
 # Test 6: Ask Teacher (Simple Question)
 test_endpoint "POST" "/api/ask-teacher" \
     '{"question":"नमस्ते, आप कैसे हैं?"}' \
