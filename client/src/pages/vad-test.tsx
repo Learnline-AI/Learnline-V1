@@ -1,11 +1,15 @@
-// VAD Test Page - Simple UI to test Voice Activity Detection WebSocket connection
-import { useState, useEffect, useRef } from 'react';
+// VAD Test Page - Complete audio pipeline with RNNoise integration for testing
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Mic, MicOff, Activity, AlertCircle, CheckCircle, Settings, BarChart3, RefreshCw } from 'lucide-react';
+import { Mic, MicOff, Activity, AlertCircle, CheckCircle, Settings, BarChart3, RefreshCw, Play, Volume2, VolumeX } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
+import { ChatBubble, TypingIndicator } from '@/components/ChatBubble';
+import { useAudioPlayback } from '@/hooks/useAudioPlayback';
+import { ChatMessage } from '@/types';
+import { apiService } from '@/lib/apiService';
 
 type ConversationState = 'idle' | 'listening' | 'processing' | 'speaking';
 
@@ -51,6 +55,7 @@ interface ConnectionData {
 }
 
 export default function VADTestPage() {
+  // Connection and recording state
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [conversationState, setConversationState] = useState<ConversationState>('idle');
@@ -68,6 +73,13 @@ export default function VADTestPage() {
   const [probabilityHistory, setProbabilityHistory] = useState<number[]>([]);
   const [providerSwitching, setProviderSwitching] = useState(false);
   
+  // Chat functionality state
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isTyping, setIsTyping] = useState(false);
+  const [transcript, setTranscript] = useState<string>('');
+  const [conversationStarted, setConversationStarted] = useState(false);
+  const [tutorPersonality] = useState<'ravi' | 'meena'>('ravi');
+  
   const socketRef = useRef<Socket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -75,6 +87,10 @@ export default function VADTestPage() {
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const animationFrameRef = useRef<number>();
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // Audio playback integration
+  const { isPlaying, currentAudio, playAudio, stopAudio } = useAudioPlayback();
 
   // Initialize Socket.IO connection
   useEffect(() => {
@@ -106,6 +122,15 @@ export default function VADTestPage() {
       console.log('🎤 VAD Event:', event);
       setLastVADEvent(event);
       
+      // Handle speech events for conversation flow
+      if (event.type === 'speech_start') {
+        // User started speaking - stop AI if it's currently speaking
+        if (isPlaying) {
+          stopAudio();
+          speechSynthesis.cancel();
+        }
+      }
+      
       // Update probability history for visualization
       if (event.data.probability !== undefined) {
         setProbabilityHistory(prev => {
@@ -128,6 +153,12 @@ export default function VADTestPage() {
     socket.on('transcription', (data: { text: string }) => {
       console.log('📝 Transcription:', data.text);
       setTranscription(data.text);
+      setTranscript(data.text);
+      
+      // Process transcription when speech ends for complete chat functionality
+      if (data.text && data.text.trim()) {
+        handleTranscriptionReady(data.text.trim());
+      }
     });
 
     socket.on('ai_response_chunk', (data: { text: string }) => {
@@ -163,7 +194,7 @@ export default function VADTestPage() {
     return () => {
       socket.disconnect();
     };
-  }, []);
+  }, [isPlaying, stopAudio]);
 
   // Audio level monitoring
   const updateAudioLevel = () => {
@@ -181,17 +212,165 @@ export default function VADTestPage() {
     }
   };
 
+  // Enhanced conversational AI system prompt
+  const getConversationalPrompt = (question: string, isFirstMessage: boolean = false) => {
+    const personality = tutorPersonality === 'ravi' ? 
+      'You are Ravi Bhaiya, a friendly older brother figure who teaches Class 9 Science in a conversational way. You use relatable examples from daily life in India, ask follow-up questions, and encourage students to think deeper.' :
+      'You are Meena Didi, a caring elder sister who makes Class 9 Science easy to understand. You use everyday examples, ask engaging questions, and create a comfortable learning environment.';
+
+    const conversationalStyle = `
+    ${personality}
+    
+    Rules for conversation:
+    - Be conversational and engaging, like talking to a friend
+    - Use simple Hindi mixed with English (Hinglish) or pure Hindi/English based on student's preference
+    - Give relatable examples from Indian daily life (like "जैसे जब आप चाय बनाते हैं...")
+    - Ask follow-up questions to check understanding
+    - Encourage students to ask "silly" questions
+    - Keep responses to 2-3 sentences, then ask a question back
+    - If interrupted, acknowledge and adjust your explanation
+    - Use encouraging phrases like "बहुत बढ़िया!", "समझ गए?", "और कोई doubt है?"
+    
+    ${isFirstMessage ? 'This is the start of conversation. Introduce yourself warmly and ask what topic they want to learn about.' : ''}
+    `;
+
+    return conversationalStyle;
+  };
+
+  // Handle transcription and AI response (copied from chat page)
+  const handleTranscriptionReady = async (transcribedText: string) => {
+    try {
+      setError(null);
+      setTranscript('');
+      
+      if (!transcribedText.trim()) {
+        return;
+      }
+      
+      const studentMessage: ChatMessage = {
+        id: Date.now().toString(),
+        type: 'student',
+        content: transcribedText,
+        timestamp: new Date(),
+        duration: '0:02',
+      };
+      
+      setMessages(prev => [...prev, studentMessage]);
+      setIsTyping(true);
+
+      // Enhanced AI request with conversational context
+      const conversationHistory = messages.slice(-4).map(msg => `${msg.type}: ${msg.content}`).join('\n');
+      const isFirstMessage = messages.length === 0 || messages[messages.length - 1]?.id === 'welcome';
+      
+      const enhancedPrompt = `${getConversationalPrompt(transcribedText, isFirstMessage)}
+      
+      Recent conversation:
+      ${conversationHistory}
+      
+      Student question: ${transcribedText}`;
+
+      // Create AI message placeholder for streaming
+      const aiMessageId = (Date.now() + 1).toString();
+      const aiMessage: ChatMessage = {
+        id: aiMessageId,
+        type: 'ai',
+        content: '',
+        timestamp: new Date(),
+        duration: '0:08',
+      };
+      
+      setMessages(prev => [...prev, aiMessage]);
+      
+      // Start streaming response
+      await apiService.askTeacherStream(
+        enhancedPrompt,
+        // On text chunk - update display immediately
+        (chunk: string, fullText: string) => {
+          setMessages(prev => prev.map(msg => 
+            msg.id === aiMessageId 
+              ? { ...msg, content: fullText }
+              : msg
+          ));
+        },
+        // On audio chunk - ignore for now, will handle TTS after completion
+        (chunkId: number, text: string, audioUrl: string) => {
+          // Audio chunks handled after completion
+        },
+        // On complete
+        async (fullText: string, totalChunks: number) => {
+          setIsTyping(false);
+          const isHindiResponse = /[\u0900-\u097F]/.test(fullText);
+          
+          setMessages(prev => prev.map(msg => 
+            msg.id === aiMessageId 
+              ? { ...msg, content: fullText }
+              : msg
+          ));
+          
+          // Start TTS
+          const speakResponse = async () => {
+            try {
+              const voiceConfig = {
+                voiceName: isHindiResponse ? 'hi-IN-Wavenet-A' : 'en-US-Wavenet-C',
+                languageCode: isHindiResponse ? 'hi-IN' : 'en-US',
+                speakingRate: 0.85,
+              };
+              
+              const ttsResponse = await apiService.getTextToSpeech(fullText, voiceConfig);
+              
+              if (ttsResponse.success && ttsResponse.data?.audioUrl) {
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { ...msg, audioUrl: ttsResponse.data?.audioUrl }
+                    : msg
+                ));
+                
+                await playAudio(ttsResponse.data?.audioUrl || '');
+              } else {
+                // Fallback to Web Speech API
+                const utterance = new SpeechSynthesisUtterance(fullText);
+                utterance.lang = isHindiResponse ? 'hi-IN' : 'en-US';
+                utterance.rate = 0.85;
+                speechSynthesis.speak(utterance);
+              }
+              
+            } catch (error) {
+              console.log('TTS failed, using Web Speech API');
+              const utterance = new SpeechSynthesisUtterance(fullText);
+              utterance.lang = isHindiResponse ? 'hi-IN' : 'en-US';
+              utterance.rate = 0.85;
+              speechSynthesis.speak(utterance);
+            }
+          };
+          
+          speakResponse();
+        },
+        // On error
+        (error: string) => {
+          setError(`Failed to get AI response: ${error}`);
+          setIsTyping(false);
+        },
+        false // No RAG for VAD test
+      );
+    } catch (error) {
+      console.error('Error processing transcription:', error);
+      setError(error instanceof Error ? error.message : 'An error occurred');
+      setIsTyping(false);
+    }
+  };
+
   const startRecording = async () => {
     try {
       setError(null);
       
-      // Get microphone access
+      // Enhanced audio constraints with WebRTC voice detection and RNNoise compatibility
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 16000, // Optimal for VAD
-          channelCount: 1,   // Mono
+          sampleRate: 16000,
+          channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true,
         }
       });
 
@@ -216,32 +395,22 @@ export default function VADTestPage() {
       processorRef.current.onaudioprocess = (event) => {
         try {
           if (!socketRef.current || !socketRef.current.connected) {
-            console.warn('🔌 WebSocket not connected, skipping audio chunk');
             return;
           }
 
           const inputBuffer = event.inputBuffer;
-          const inputData = inputBuffer.getChannelData(0); // Get mono channel
+          const inputData = inputBuffer.getChannelData(0);
           
           // Convert Float32Array to 16-bit PCM
           const pcmData = new Int16Array(inputData.length);
           for (let i = 0; i < inputData.length; i++) {
-            // Convert from -1.0 to 1.0 range to -32768 to 32767 range
             pcmData[i] = Math.max(-32768, Math.min(32767, Math.floor(inputData[i] * 32768)));
           }
           
-          // Convert to Uint8Array for browser-compatible base64 encoding
+          // Convert to Uint8Array for base64 encoding
           const uint8Array = new Uint8Array(pcmData.buffer);
-          
-          // Use browser's native base64 encoding instead of Node.js Buffer
           const base64String = btoa(String.fromCharCode.apply(null, Array.from(uint8Array)));
           
-          // Only log occasionally to avoid console spam
-          if (Math.random() < 0.05) {
-            console.log(`📤 Sending PCM audio chunk: ${pcmData.length} samples, ${uint8Array.length} bytes, base64 length: ${base64String.length}`);
-          }
-          
-          // Verify we have valid data before sending
           if (base64String.length > 0) {
             const audioChunkData = {
               audioData: base64String,
@@ -251,17 +420,7 @@ export default function VADTestPage() {
               format: 'pcm16'
             };
             
-            try {
-              socketRef.current.emit('audio_chunk', audioChunkData);
-              // Only log every 10th chunk to avoid spam
-              if (Math.random() < 0.1) {
-                console.log('📤 Audio chunk sent successfully');
-              }
-            } catch (emitError) {
-              console.error('❌ Failed to emit audio chunk:', emitError);
-            }
-          } else {
-            console.error('❌ Failed to create base64 audio data');
+            socketRef.current.emit('audio_chunk', audioChunkData);
           }
         } catch (error) {
           console.error('❌ Error processing audio chunk:', error);
@@ -276,9 +435,9 @@ export default function VADTestPage() {
       processorRef.current.connect(audioContextRef.current.destination);
       
       updateAudioLevel();
-
       setIsRecording(true);
-      console.log('🎤 Recording started');
+      setConversationStarted(true);
+      console.log('🎤 Recording started with enhanced VAD pipeline');
 
     } catch (err) {
       console.error('❌ Failed to start recording:', err);
@@ -308,6 +467,7 @@ export default function VADTestPage() {
 
     setIsRecording(false);
     setAudioLevel(0);
+    setConversationStarted(false);
     console.log('🔇 Recording stopped');
   };
 
@@ -338,11 +498,22 @@ export default function VADTestPage() {
     }
   };
   
+  // Start conversation (copied from chat page)
+  const startConversation = async () => {
+    // Simply start VAD recording without any intro message
+    await startRecording();
+  };
+  
   const refreshVADStats = () => {
     if (socketRef.current && isConnected) {
       socketRef.current.emit('get_vad_stats');
     }
   };
+  
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isTyping]);
   
   const renderProbabilityGraph = () => {
     if (probabilityHistory.length === 0) return null;
@@ -368,8 +539,8 @@ export default function VADTestPage() {
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">VAD Test Interface</h1>
-          <p className="text-gray-600">Test Voice Activity Detection WebSocket connection</p>
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Complete Audio Pipeline Test</h1>
+          <p className="text-gray-600">Test RNNoise + VAD + STT + AI + TTS Pipeline with WebSocket</p>
           
           {/* Navigation help */}
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-4">
@@ -499,23 +670,40 @@ export default function VADTestPage() {
           <CardContent>
             <div className="space-y-4">
               <div className="flex items-center gap-4">
-                <Button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  disabled={!isConnected}
-                  className={isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}
-                >
-                  {isRecording ? (
-                    <>
-                      <MicOff className="w-4 h-4 mr-2" />
-                      Stop Recording
-                    </>
-                  ) : (
-                    <>
-                      <Mic className="w-4 h-4 mr-2" />
-                      Start Recording
-                    </>
-                  )}
-                </Button>
+                {!conversationStarted ? (
+                  <Button
+                    onClick={startConversation}
+                    disabled={!isConnected}
+                    className="flex items-center gap-2"
+                  >
+                    <Activity className="w-5 h-5" />
+                    Start VAD Test Conversation
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      onClick={isRecording ? stopRecording : startRecording}
+                      disabled={!isConnected}
+                      variant={isRecording ? "destructive" : "default"}
+                      className="flex items-center gap-2"
+                    >
+                      {isRecording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                      {isRecording ? 'Stop Recording' : 'Start Recording'}
+                    </Button>
+                  </>
+                )}
+                
+                {/* Clear Messages Button */}
+                {messages.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setMessages([])}
+                    className="text-xs"
+                  >
+                    Clear Chat
+                  </Button>
+                )}
               </div>
               
               {/* Audio Level Visualization */}
@@ -618,10 +806,65 @@ export default function VADTestPage() {
           </CardContent>
         </Card>
 
-        {/* Transcription */}
+        {/* Chat Messages with Full Audio Pipeline */}
         <Card>
           <CardHeader>
-            <CardTitle>Speech Transcription</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <Volume2 className="w-5 h-5" />
+              Live Chat with AI (VAD + TTS Testing)
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Live Transcription */}
+              {transcript && (
+                <div className="w-full p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <p className="text-sm text-blue-800 dark:text-blue-200 font-medium mb-1">
+                    सुन रहा हूँ...
+                  </p>
+                  <p className="text-blue-900 dark:text-blue-100">{transcript}</p>
+                </div>
+              )}
+              
+              {/* Chat Messages */}
+              <div className="max-h-80 overflow-y-auto space-y-3">
+                {messages.map((message) => (
+                  <ChatBubble 
+                    key={message.id} 
+                    message={message} 
+                    onPlayAudio={playAudio}
+                    isPlaying={isPlaying && currentAudio === message.audioUrl}
+                  />
+                ))}
+                
+                {isTyping && <TypingIndicator />}
+                <div ref={messagesEndRef} />
+              </div>
+              
+              {/* Audio Playback Status */}
+              {isPlaying && (
+                <div className="flex items-center gap-2 p-2 bg-green-50 rounded-lg border border-green-200">
+                  <Play className="w-4 h-4 text-green-600" />
+                  <span className="text-sm text-green-800">Playing AI response...</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={stopAudio}
+                    className="ml-auto text-xs"
+                  >
+                    <VolumeX className="w-3 h-3 mr-1" />
+                    Stop
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Speech Transcription (Separate for debugging) */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Raw Speech Transcription</CardTitle>
           </CardHeader>
           <CardContent>
             {transcription ? (
@@ -691,21 +934,34 @@ export default function VADTestPage() {
             <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
               <li>Ensure you're connected to the Enhanced VAD server</li>
               <li>Check the VAD provider (Silero ONNX or Custom fallback)</li>
-              <li>Click "Start Recording" to begin voice activity detection</li>
-              <li>Speak into your microphone - watch real-time probability analysis</li>
-              <li>Monitor the speech probability graph and statistics</li>
+              <li>Click "Start VAD Test Conversation" to begin the complete pipeline</li>
+              <li>Start/Stop recording to test voice activity detection</li>
+              <li>Speak into your microphone - watch real-time processing:</li>
+              <ul className="list-disc list-inside ml-4 space-y-1">
+                <li>RNNoise voice isolation processing</li>
+                <li>VAD speech detection and probability analysis</li>
+                <li>Speech-to-text transcription</li>
+                <li>AI response generation with streaming</li>
+                <li>Text-to-speech audio playback</li>
+              </ul>
+              <li>Monitor the speech probability graph and VAD statistics</li>
               <li>Switch between VAD providers to compare performance</li>
-              <li>Use debug panel to see detailed VAD processing information</li>
-              <li>Click "Stop Recording" to end the session</li>
+              <li>Use debug panel to see detailed processing information</li>
+              <li>Test the complete conversational AI pipeline end-to-end</li>
             </ol>
             <div className="mt-4 p-3 bg-blue-50 rounded">
-              <div className="text-sm font-medium text-blue-800">Features:</div>
+              <div className="text-sm font-medium text-blue-800">Complete Audio Pipeline Features:</div>
               <ul className="text-xs text-blue-700 mt-1 space-y-1">
-                <li>• Real-time Silero ONNX VAD with Custom fallback</li>
-                <li>• Live probability visualization and statistics</li>
-                <li>• Provider switching and performance comparison</li>
-                <li>• Comprehensive debug information</li>
-                <li>• Optimized for Hindi/English speech detection</li>
+                <li>• <strong>RNNoise Integration:</strong> Neural network voice isolation</li>
+                <li>• <strong>Dual VAD System:</strong> Silero ONNX + Custom fallback</li>
+                <li>• <strong>Enhanced WebRTC:</strong> Voice activity detection constraints</li>
+                <li>• <strong>Real-time STT:</strong> Speech-to-text with live transcription</li>
+                <li>• <strong>AI Conversation:</strong> Streaming responses with Ravi Bhaiya</li>
+                <li>• <strong>TTS Playback:</strong> Text-to-speech with audio queue management</li>
+                <li>• <strong>Live Monitoring:</strong> Probability visualization and statistics</li>
+                <li>• <strong>Provider Testing:</strong> Switch between VAD implementations</li>
+                <li>• <strong>Debug Panel:</strong> Comprehensive processing information</li>
+                <li>• <strong>Language Support:</strong> Optimized for Hindi/English/Hinglish</li>
               </ul>
             </div>
           </CardContent>
