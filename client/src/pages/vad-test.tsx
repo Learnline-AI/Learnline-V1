@@ -332,72 +332,127 @@ export default function VADTestPage() {
       console.log(`✅ Concurrent operations completed in ${concurrentTime.toFixed(2)}ms`);
       console.log('🎯 Results:', { sttResult, context, emotion });
       
-      // Step 3: Mock AI response (Q&A temporarily disabled)
-      const mockResponse = `Q&A temporarily disabled for concurrent I/O testing.\n\nTranscription: "${transcribedText}"\n\nConcurrent operations completed successfully:\n• STT: ✅ ${sttResult.text}\n• Context: ✅ Retrieved session data\n• Emotion: ✅ ${emotion ? emotion.emotion : 'Analysis completed'}`;
+      // Step 3: AI processing with concurrent I/O optimization data
+      setPerformanceMetrics(prev => ({
+        ...prev,
+        operationStatus: 'processing AI response...'
+      }));
+
+      // Enhanced AI request with conversational context and concurrent operation results
+      const conversationHistory = messages.slice(-4).map(msg => `${msg.type}: ${msg.content}`).join('\n');
+      const isFirstMessage = messages.length === 0 || messages[messages.length - 1]?.id === 'welcome';
       
-      // Create AI message with mock response
+      const enhancedPrompt = `${getConversationalPrompt(transcribedText, isFirstMessage)}
+      
+      Recent conversation:
+      ${conversationHistory}
+      
+      Student question: ${transcribedText}
+      
+      [Performance Note: This response was optimized using concurrent I/O processing - STT, context, and emotion analysis completed in ${concurrentTime.toFixed(0)}ms vs ${expectedSequentialTime}ms sequentially]`;
+
+      // Create AI message placeholder for streaming
       const aiMessageId = (Date.now() + 1).toString();
       const aiMessage: ChatMessage = {
         id: aiMessageId,
         type: 'ai',
-        content: mockResponse,
+        content: '',
         timestamp: new Date(),
-        duration: '0:05',
+        duration: '0:08',
       };
       
       setMessages(prev => [...prev, aiMessage]);
-      setIsTyping(false);
       
-      // Step 4: TTS for mock response (keeping TTS functionality for testing)
-      const speakResponse = async () => {
-        try {
+      // Step 4: Start streaming AI response
+      await apiService.askTeacherStream(
+        enhancedPrompt,
+        // On text chunk - update display immediately
+        (chunk: string, fullText: string) => {
+          setMessages(prev => prev.map(msg => 
+            msg.id === aiMessageId 
+              ? { ...msg, content: fullText }
+              : msg
+          ));
+        },
+        // On audio chunk - ignore for now, will handle TTS after completion
+        (chunkId: number, text: string, audioUrl: string) => {
+          // Audio chunks handled after completion
+        },
+        // On complete
+        async (fullText: string, totalChunks: number) => {
+          setIsTyping(false);
+          const isHindiResponse = /[\u0900-\u097F]/.test(fullText);
+          
+          setMessages(prev => prev.map(msg => 
+            msg.id === aiMessageId 
+              ? { ...msg, content: fullText }
+              : msg
+          ));
+          
+          // Step 5: TTS for AI response
+          const speakResponse = async () => {
+            try {
+              setPerformanceMetrics(prev => ({
+                ...prev,
+                operationStatus: 'generating TTS...'
+              }));
+              
+              const voiceConfig = {
+                voiceName: isHindiResponse ? 'hi-IN-Wavenet-A' : 'en-US-Wavenet-C',
+                languageCode: isHindiResponse ? 'hi-IN' : 'en-US',
+                speakingRate: 0.85,
+              };
+              
+              const ttsResponse = await apiService.getTextToSpeech(fullText, voiceConfig);
+              
+              if (ttsResponse.success && ttsResponse.data?.audioUrl) {
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { ...msg, audioUrl: ttsResponse.data?.audioUrl }
+                    : msg
+                ));
+                
+                await playAudio(ttsResponse.data?.audioUrl || '');
+              } else {
+                // Fallback to Web Speech API
+                const utterance = new SpeechSynthesisUtterance(fullText);
+                utterance.lang = isHindiResponse ? 'hi-IN' : 'en-US';
+                utterance.rate = 0.85;
+                speechSynthesis.speak(utterance);
+              }
+              
+              setPerformanceMetrics(prev => ({
+                ...prev,
+                operationStatus: 'AI response and TTS completed'
+              }));
+              
+            } catch (error) {
+              console.log('TTS failed, using Web Speech API');
+              const utterance = new SpeechSynthesisUtterance(fullText);
+              utterance.lang = isHindiResponse ? 'hi-IN' : 'en-US';
+              utterance.rate = 0.85;
+              speechSynthesis.speak(utterance);
+              
+              setPerformanceMetrics(prev => ({
+                ...prev,
+                operationStatus: 'AI response completed (TTS fallback)'
+              }));
+            }
+          };
+          
+          speakResponse();
+        },
+        // On error
+        (error: string) => {
+          setError(`Failed to get AI response: ${error}`);
+          setIsTyping(false);
           setPerformanceMetrics(prev => ({
             ...prev,
-            operationStatus: 'generating TTS...'
+            operationStatus: 'AI processing error'
           }));
-          
-          const ttsResponse = await apiService.getTextToSpeech(mockResponse, {
-            voiceName: 'en-US-Wavenet-C',
-            languageCode: 'en-US',
-            speakingRate: 0.85,
-          });
-          
-          if (ttsResponse.success && ttsResponse.data?.audioUrl) {
-            setMessages(prev => prev.map(msg => 
-              msg.id === aiMessageId 
-                ? { ...msg, audioUrl: ttsResponse.data?.audioUrl }
-                : msg
-            ));
-            
-            await playAudio(ttsResponse.data?.audioUrl || '');
-          } else {
-            // Fallback to Web Speech API
-            const utterance = new SpeechSynthesisUtterance(mockResponse);
-            utterance.lang = 'en-US';
-            utterance.rate = 0.85;
-            speechSynthesis.speak(utterance);
-          }
-          
-          setPerformanceMetrics(prev => ({
-            ...prev,
-            operationStatus: 'TTS completed'
-          }));
-          
-        } catch (error) {
-          console.log('TTS failed, using Web Speech API');
-          const utterance = new SpeechSynthesisUtterance(mockResponse);
-          utterance.lang = 'en-US';
-          utterance.rate = 0.85;
-          speechSynthesis.speak(utterance);
-          
-          setPerformanceMetrics(prev => ({
-            ...prev,
-            operationStatus: 'TTS completed (fallback)'
-          }));
-        }
-      };
-      
-      speakResponse();
+        },
+        false // No RAG for VAD test
+      );
       
     } catch (error) {
       console.error('Error in concurrent transcription processing:', error);
@@ -873,14 +928,14 @@ export default function VADTestPage() {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              {/* Q&A Disabled Indicator */}
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              {/* Q&A Enabled Indicator */}
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
                 <div className="flex items-center gap-2">
-                  <AlertCircle className="w-5 h-5 text-red-600" />
-                  <Badge className="bg-red-500 text-white">Q&A TEMPORARILY DISABLED</Badge>
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <Badge className="bg-green-500 text-white">Q&A ENABLED WITH CONCURRENT I/O</Badge>
                 </div>
-                <p className="text-sm text-red-800 mt-2">
-                  Testing concurrent I/O optimization - AI responses replaced with performance data
+                <p className="text-sm text-green-800 mt-2">
+                  Live AI responses powered by concurrent I/O optimization for faster processing
                 </p>
               </div>
               
@@ -955,8 +1010,8 @@ export default function VADTestPage() {
                 <Volume2 className="w-5 h-5" />
                 Live Chat with AI (VAD + TTS Testing)
               </div>
-              <Badge className="bg-red-100 text-red-800 border border-red-300">
-                Q&A Disabled - Testing Mode
+              <Badge className="bg-green-100 text-green-800 border border-green-300">
+                Q&A Enabled - Concurrent I/O
               </Badge>
             </CardTitle>
           </CardHeader>
@@ -1074,46 +1129,47 @@ export default function VADTestPage() {
         {/* Instructions */}
         <Card>
           <CardHeader>
-            <CardTitle>Concurrent I/O Testing Instructions</CardTitle>
+            <CardTitle>Enhanced Q&A with Concurrent I/O Instructions</CardTitle>
           </CardHeader>
           <CardContent>
             <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
               <li>Ensure you're connected to the Enhanced VAD server</li>
               <li>Check the VAD provider (Silero ONNX or Custom fallback)</li>
-              <li>Click "Start VAD Test Conversation" to begin the concurrent I/O pipeline</li>
+              <li>Click "Start VAD Test Conversation" to begin the optimized AI conversation</li>
               <li>Start/Stop recording to test voice activity detection</li>
-              <li>Speak into your microphone - watch concurrent processing:</li>
+              <li>Speak into your microphone - experience the full optimized pipeline:</li>
               <ul className="list-disc list-inside ml-4 space-y-1">
                 <li><strong>Sequential:</strong> RNNoise voice isolation → VAD detection</li>
-                <li><strong>Concurrent:</strong> STT + Context Fetching + Emotion Analysis</li>
-                <li><strong>Mock Response:</strong> Q&A disabled, performance data shown</li>
-                <li><strong>TTS Testing:</strong> Text-to-speech audio playback</li>
+                <li><strong>Concurrent:</strong> STT + Context Fetching + Emotion Analysis (parallel)</li>
+                <li><strong>Live AI Responses:</strong> Real Q&A with Ravi Bhaiya powered by optimized processing</li>
+                <li><strong>Smart TTS:</strong> Language-aware text-to-speech audio playback</li>
               </ul>
               <li>Monitor performance metrics showing time savings from concurrent operations</li>
-              <li>Watch real-time operation status updates</li>
+              <li>Watch real-time operation status updates during AI processing</li>
               <li>Use debug panel to see detailed VAD processing information</li>
-              <li>Test the concurrent I/O optimization effectiveness</li>
+              <li>Experience faster responses through concurrent I/O optimization</li>
             </ol>
-            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
-              <div className="text-sm font-medium text-yellow-800">⚠️ Testing Mode Features:</div>
-              <ul className="text-xs text-yellow-700 mt-1 space-y-1">
-                <li>• <strong>Q&A Temporarily Disabled:</strong> AI responses replaced with performance data</li>
+            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded">
+              <div className="text-sm font-medium text-green-800">✅ Enhanced Features:</div>
+              <ul className="text-xs text-green-700 mt-1 space-y-1">
+                <li>• <strong>Live Q&A Enabled:</strong> Full AI conversation functionality with Ravi Bhaiya</li>
                 <li>• <strong>Concurrent I/O Optimization:</strong> STT, Context, and Emotion analysis run in parallel</li>
                 <li>• <strong>Performance Monitoring:</strong> Real-time timing comparisons and metrics</li>
                 <li>• <strong>Operation Tracking:</strong> Live status updates for each concurrent operation</li>
                 <li>• <strong>Time Savings Display:</strong> Shows improvement percentage from concurrent processing</li>
-                <li>• <strong>TTS Functionality:</strong> Audio playback testing continues to work</li>
+                <li>• <strong>Smart TTS:</strong> Hindi/English language detection with appropriate voices</li>
                 <li>• <strong>VAD Preservation:</strong> All voice activity detection features remain intact</li>
                 <li>• <strong>Error Handling:</strong> Graceful fallbacks if concurrent operations fail</li>
               </ul>
             </div>
-            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded">
-              <div className="text-sm font-medium text-green-800">Expected Performance Improvements:</div>
-              <ul className="text-xs text-green-700 mt-1 space-y-1">
+            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
+              <div className="text-sm font-medium text-blue-800">Performance Improvements:</div>
+              <ul className="text-xs text-blue-700 mt-1 space-y-1">
                 <li>• <strong>Sequential Time:</strong> ~550ms (STT: 300ms + Context: 100ms + Emotion: 150ms)</li>
                 <li>• <strong>Concurrent Time:</strong> ~300ms (maximum of parallel operations)</li>
                 <li>• <strong>Time Savings:</strong> ~250ms (45% improvement)</li>
                 <li>• <strong>Efficiency Gain:</strong> Better resource utilization through parallel I/O</li>
+                <li>• <strong>Enhanced UX:</strong> Faster AI responses with performance transparency</li>
               </ul>
             </div>
           </CardContent>
