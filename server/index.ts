@@ -3,6 +3,7 @@ import cors from "cors";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { validateEnvironment } from "./config/aiConfig";
+import { performanceMonitor } from "./utils/performanceMonitor";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -30,6 +31,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '15mb' })); // Increased limit for audio uploads (base64 encoded)
 app.use(express.urlencoded({ extended: false, limit: '15mb' }));
+
+// Add performance monitoring middleware
+app.use(performanceMonitor.getMiddleware());
 
 // Enhanced logging middleware
 app.use((req, res, next) => {
@@ -160,6 +164,10 @@ app.use((req, res, next) => {
     host,
     () => {
       log(`serving on ${host}:${port}`);
+      
+      // Start performance monitoring after server is running
+      console.log('🔍 Starting performance monitoring...');
+      performanceMonitor.startMonitoring();
     },
   );
 })();
