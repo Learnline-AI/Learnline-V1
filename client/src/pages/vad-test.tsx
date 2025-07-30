@@ -245,7 +245,6 @@ export default function VADTestPage() {
   // Concurrent I/O handler for optimized processing
   const handleConcurrentTranscription = async (transcribedText: string, audioBuffer?: ArrayBuffer) => {
     try {
-      setError(null);
       setTranscript('');
       
       if (!transcribedText.trim()) {
@@ -413,7 +412,7 @@ export default function VADTestPage() {
         },
         // On error
         (error: string) => {
-          setError(`Failed to get AI response: ${error}`);
+          console.error('Failed to get AI response:', error);
           setIsTyping(false);
           setPerformanceMetrics(prev => ({
             ...prev,
@@ -425,7 +424,6 @@ export default function VADTestPage() {
       
     } catch (error) {
       console.error('Error in concurrent transcription processing:', error);
-      setError(error instanceof Error ? error.message : 'Concurrent processing failed');
       setIsTyping(false);
       setPerformanceMetrics(prev => ({
         ...prev,
@@ -442,7 +440,6 @@ export default function VADTestPage() {
 
   const startRecording = async () => {
     try {
-      setError(null);
       
       // Enhanced audio constraints with WebRTC voice detection and RNNoise compatibility
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -514,7 +511,6 @@ export default function VADTestPage() {
 
     } catch (err) {
       console.error('❌ Failed to start recording:', err);
-      setError('Failed to access microphone');
     }
   };
 
