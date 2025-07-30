@@ -104,6 +104,11 @@ app.use((req, res, next) => {
   const server = await registerRoutes(app);
   console.log('✅ API routes registered successfully');
 
+  // Initialize WebSocket Audio Server
+  const { AudioWebSocketServer } = await import('./websocket/audioWebSocket');
+  const wsAudioServer = new AudioWebSocketServer(server);
+  console.log('✅ WebSocket Audio Server initialized');
+
   app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
