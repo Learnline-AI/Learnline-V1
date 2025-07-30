@@ -4,6 +4,8 @@ import { Server as HTTPServer } from 'http';
 import { createVADInstance, ConversationVAD, VADEvent } from '../services/vadService';
 import { ConnectionManager } from './connectionManager';
 import { AudioProcessor } from './audioProcessor';
+import { generateAIResponse } from '../services/aiService';
+import { SYSTEM_PROMPTS } from '../config/aiConfig';
 
 interface AudioChunkData {
   audioData: string; // base64 encoded PCM16 audio
@@ -289,6 +291,10 @@ export class AudioWebSocketServer {
       if (result.success && result.transcription) {
         console.log(`📝 WebSocket: Transcription ready [${sessionId}]: "${result.transcription}"`);
         socket.emit('transcription', { text: result.transcription });
+        
+        // Generate AI response from transcription
+        await this.generateAIResponseForTranscription(socket, sessionId, result.transcription);
+        
       } else {
         console.warn(`⚠️ WebSocket: Transcription failed [${sessionId}]: ${result.error}`);
         socket.emit('error', { message: result.error || 'Transcription failed' });
@@ -297,6 +303,64 @@ export class AudioWebSocketServer {
     } catch (error) {
       console.error(`❌ WebSocket: Error processing collected audio [${sessionId}]:`, error);
       socket.emit('error', { message: 'Audio processing failed' });
+    }
+  }
+
+  private async generateAIResponseForTranscription(socket: Socket, sessionId: string, transcription: string): Promise<void> {
+    try {
+      console.log(`🤖 WebSocket: Generating AI response [${sessionId}] for: "${transcription}"`);
+      
+      // Update conversation state
+      socket.emit('conversation_state', { state: 'thinking' });
+
+      // Generate AI response using the same system prompt as HTTP endpoint
+      const systemPrompt = SYSTEM_PROMPTS.HINDI_TEACHER_BASE;
+      const aiResponse = await generateAIResponse(transcription, systemPrompt, true);
+      
+      if (!('stream' in aiResponse)) {
+        throw new Error('Expected streaming response from AI service');
+      }
+
+      let fullResponse = "";
+      let chunkCount = 0;
+
+      // Handle streaming AI response
+      for await (const chunk of aiResponse.stream) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+          const text = chunk.delta.text;
+          fullResponse += text;
+          chunkCount++;
+          
+          // Emit AI response chunks
+          socket.emit('ai_response_chunk', { 
+            text, 
+            chunkId: chunkCount,
+            isComplete: false 
+          });
+          
+          // Log occasionally for monitoring
+          if (chunkCount % 10 === 0) {
+            console.log(`📤 WebSocket: AI chunk ${chunkCount} [${sessionId}]: "${text.substring(0, 50)}..."`);
+          }
+        }
+      }
+
+      // Emit completion
+      socket.emit('ai_response_chunk', { 
+        text: '', 
+        chunkId: chunkCount + 1, 
+        isComplete: true 
+      });
+      
+      socket.emit('conversation_state', { state: 'completed' });
+      console.log(`✅ WebSocket: AI response completed [${sessionId}] - ${fullResponse.length} chars, ${chunkCount} chunks`);
+
+    } catch (error) {
+      console.error(`❌ WebSocket: AI response generation failed [${sessionId}]:`, error);
+      socket.emit('error', { 
+        message: `AI response failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
+      });
+      socket.emit('conversation_state', { state: 'error' });
     }
   }
 

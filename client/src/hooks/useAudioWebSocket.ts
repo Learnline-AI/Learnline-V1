@@ -75,6 +75,7 @@ export function useAudioWebSocket(config: AudioWebSocketConfig = {}) {
   const [transcriptionCallback, setTranscriptionCallback] = useState<((text: string) => void) | null>(null);
   const [vadEventCallback, setVADEventCallback] = useState<((event: VADEvent) => void) | null>(null);
   const [conversationStateCallback, setConversationStateCallback] = useState<((state: string) => void) | null>(null);
+  const [aiResponseCallback, setAiResponseCallback] = useState<((chunk: { text: string; chunkId: number; isComplete: boolean }) => void) | null>(null);
 
   // Refs for managing connection
   const socketRef = useRef<Socket | null>(null);
@@ -175,6 +176,15 @@ export function useAudioWebSocket(config: AudioWebSocketConfig = {}) {
         }
       });
 
+      socket.on('ai_response_chunk', (data: { text: string; chunkId: number; isComplete: boolean }) => {
+        console.log('🤖 WebSocket: AI response chunk received:', data);
+        setStats(prev => ({ ...prev, messagesReceived: prev.messagesReceived + 1 }));
+        
+        if (aiResponseCallback) {
+          aiResponseCallback(data);
+        }
+      });
+
       socket.on('error', (data: { message: string }) => {
         console.error('❌ WebSocket: Server error:', data.message);
         setError(data.message);
@@ -211,7 +221,7 @@ export function useAudioWebSocket(config: AudioWebSocketConfig = {}) {
         reject(error);
       });
     });
-  }, [transcriptionCallback, vadEventCallback, conversationStateCallback, fullConfig.autoReconnect]);
+  }, [transcriptionCallback, vadEventCallback, conversationStateCallback, aiResponseCallback, fullConfig.autoReconnect]);
 
   /**
    * Send binary audio chunk
@@ -368,6 +378,10 @@ export function useAudioWebSocket(config: AudioWebSocketConfig = {}) {
     setConversationStateCallback(() => callback);
   }, []);
 
+  const onAIResponse = useCallback((callback: (chunk: { text: string; chunkId: number; isComplete: boolean }) => void) => {
+    setAiResponseCallback(() => callback);
+  }, []);
+
   /**
    * Get comprehensive connection info
    */
@@ -412,6 +426,7 @@ export function useAudioWebSocket(config: AudioWebSocketConfig = {}) {
     onTranscription,
     onVADEvent,
     onConversationState,
+    onAIResponse,
     
     // State
     connectionStatus,

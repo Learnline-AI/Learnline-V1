@@ -84,6 +84,10 @@ export default function VADTestPage() {
   // Audio playback integration
   const { isPlaying, currentAudio, playAudio, stopAudio } = useAudioPlayback();
 
+  // AI Response state for WebSocket streaming
+  const [currentAIResponse, setCurrentAIResponse] = useState<string>('');
+  const [aiResponseComplete, setAiResponseComplete] = useState<boolean>(false);
+
   // WebSocket integration for real-time audio streaming
   const {
     connect,
@@ -94,6 +98,7 @@ export default function VADTestPage() {
     onTranscription,
     onVADEvent,
     onConversationState,
+    onAIResponse,
     connectionStatus,
     error,
     sessionId,
@@ -153,9 +158,51 @@ export default function VADTestPage() {
       setTranscription(text);
       setTranscript(text);
       
-      // Process transcription when speech ends for complete chat functionality
+      // Add user message to chat when transcription is ready
       if (text && text.trim()) {
-        handleTranscriptionReady(text.trim());
+        const userMessage: ChatMessage = {
+          id: Date.now().toString(),
+          text: text.trim(),
+          sender: 'user',
+          timestamp: new Date(),
+          tutorPersonality: tutorPersonality
+        };
+        setMessages(prev => [...prev, userMessage]);
+        
+        // Reset AI response state for new conversation
+        setCurrentAIResponse('');
+        setAiResponseComplete(false);
+        setIsTyping(true);
+      }
+    });
+
+    // Handle AI response chunks from WebSocket
+    onAIResponse((chunk) => {
+      console.log('🤖 AI Response chunk:', chunk);
+      
+      if (chunk.isComplete) {
+        // AI response is complete
+        setIsTyping(false);
+        setAiResponseComplete(true);
+        console.log('✅ AI response completed:', currentAIResponse);
+        
+        // Add complete AI message to chat
+        if (currentAIResponse.trim()) {
+          const aiMessage: ChatMessage = {
+            id: Date.now().toString(),
+            text: currentAIResponse.trim(),
+            sender: 'tutor',
+            timestamp: new Date(),
+            tutorPersonality: tutorPersonality
+          };
+          setMessages(prev => [...prev, aiMessage]);
+        }
+        
+        // Reset for next conversation
+        setCurrentAIResponse('');
+      } else {
+        // Accumulate AI response chunks
+        setCurrentAIResponse(prev => prev + chunk.text);
       }
     });
 
@@ -163,7 +210,7 @@ export default function VADTestPage() {
     return () => {
       disconnect();
     };
-  }, [connect, disconnect, onVADEvent, onConversationState, onTranscription, isPlaying, stopAudio]);
+  }, [connect, disconnect, onVADEvent, onConversationState, onTranscription, onAIResponse, isPlaying, stopAudio, tutorPersonality, currentAIResponse]);
 
   // Audio level monitoring
   const updateAudioLevel = () => {
@@ -582,10 +629,10 @@ export default function VADTestPage() {
     }
   };
   
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive or AI response updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  }, [messages, isTyping, currentAIResponse]);
   
   const renderProbabilityGraph = () => {
     if (probabilityHistory.length === 0) return null;
@@ -1062,7 +1109,20 @@ export default function VADTestPage() {
                   />
                 ))}
                 
-                {isTyping && <TypingIndicator />}
+                {/* Show streaming AI response */}
+                {currentAIResponse && !aiResponseComplete && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[85%] bg-blue-100 border border-blue-200 rounded-lg p-3">
+                      <div className="text-sm text-blue-900 whitespace-pre-wrap">
+                        {currentAIResponse}
+                        <span className="inline-block w-2 h-4 bg-blue-600 animate-pulse ml-1"></span>
+                      </div>
+                      <div className="text-xs text-blue-600 mt-1">Ravi Bhaiya is typing...</div>
+                    </div>
+                  </div>
+                )}
+                
+                {isTyping && !currentAIResponse && <TypingIndicator />}
                 <div ref={messagesEndRef} />
               </div>
               
