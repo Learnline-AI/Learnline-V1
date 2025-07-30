@@ -104,11 +104,6 @@ app.use((req, res, next) => {
   const server = await registerRoutes(app);
   console.log('✅ API routes registered successfully');
 
-  // Initialize WebSocket Audio Server
-  const { AudioWebSocketServer } = await import('./websocket/audioWebSocket');
-  const wsAudioServer = new AudioWebSocketServer(server);
-  console.log('✅ WebSocket Audio Server initialized');
-
   app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
@@ -161,7 +156,7 @@ app.use((req, res, next) => {
     await setupVite(app, server);
   }
 
-  const port = process.env.PORT || 3000; // Use 3000 instead of 5000 to avoid macOS Control Center conflict
+  const port = parseInt(process.env.PORT || '3000', 10); // Parse port as integer for Railway compatibility
   const host = '0.0.0.0'; // Important for Railway deployment
   
   server.listen(
