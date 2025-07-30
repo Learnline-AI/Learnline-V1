@@ -2,6 +2,7 @@
 import { EventEmitter } from 'events';
 import { SileroONNXVAD, createSileroVAD, type SileroVADResult } from './sileroVAD';
 import { getRNNoiseService, type RNNoiseService } from './rnnoiseService';
+import { getFacebookDenoiserService, type FacebookDenoiserService } from './facebookDenoiserService';
 import { 
   convertPCM16ToFloat32_48kHz, 
   convertFloat32ToPCM16_16kHz,
@@ -23,11 +24,17 @@ const VAD_DEBUG = process.env.VAD_DEBUG === 'true';
 const RNNOISE_ENABLED = process.env.RNNOISE_ENABLED !== 'false'; // Default enabled
 const RNNOISE_DEBUG = process.env.RNNOISE_DEBUG === 'true';
 
+// Facebook Denoiser configuration from environment
+const FACEBOOK_DENOISER_ENABLED = process.env.FACEBOOK_DENOISER_ENABLED !== 'false'; // Default enabled
+const FACEBOOK_DENOISER_DEBUG = process.env.FACEBOOK_DENOISER_DEBUG === 'true';
+
 // Enhanced VAD Configuration supporting RNNoise + Silero ONNX and Custom VAD
 interface VADConfig {
   sampleRate: number;
   provider: VADProvider;
-  // RNNoise voice isolation settings
+  // Voice isolation settings
+  facebookDenoiserEnabled: boolean;
+  facebookDenoiserDebug: boolean;
   rnnoiseEnabled: boolean;
   rnnoiseDebug: boolean;
   // Silero VAD specific settings
@@ -49,7 +56,9 @@ interface VADConfig {
 const DEFAULT_VAD_CONFIG: VADConfig = {
   sampleRate: 16000,
   provider: VAD_PROVIDER,
-  // RNNoise voice isolation settings
+  // Voice isolation settings (Facebook Denoiser primary, RNNoise fallback)
+  facebookDenoiserEnabled: FACEBOOK_DENOISER_ENABLED,
+  facebookDenoiserDebug: FACEBOOK_DENOISER_DEBUG,
   rnnoiseEnabled: RNNOISE_ENABLED,
   rnnoiseDebug: RNNOISE_DEBUG,
   // Silero VAD settings (optimized for Hindi/English)
@@ -85,6 +94,16 @@ export interface VADEvent {
         activity: number;
         probability: number;
       };
+      facebookDenoiserResult?: {
+        enabled: boolean;
+        processed: boolean;
+        processingTime: number;
+        success: boolean;
+        inputSamples: number;
+        outputSamples: number;
+        fallbackUsed?: boolean;
+        errorMessage?: string;
+      };
       rnnoiseResult?: {
         enabled: boolean;
         processed: boolean;
@@ -108,7 +127,8 @@ export class ConversationVAD extends EventEmitter {
   private isInitialized = false;
   private isMounted = true;
   
-  // RNNoise service instance
+  // Voice isolation service instances
+  private facebookDenoiserService: FacebookDenoiserService | null = null;
   private rnnoiseService: RNNoiseService | null = null;
   
   // VAD Provider instances
@@ -130,9 +150,13 @@ export class ConversationVAD extends EventEmitter {
     sileroErrors: 0,
     customFallbacks: 0,
     totalProcessed: 0,
+    facebookDenoiserSuccess: 0,
+    facebookDenoiserErrors: 0,
+    facebookDenoiserSkipped: 0,
     rnnoiseSuccess: 0,
     rnnoiseErrors: 0,
     rnnoiseSkipped: 0,
+    fallbacksToRnnoise: 0,
   };
 
   constructor(config: Partial<VADConfig> = {}) {
@@ -148,6 +172,7 @@ export class ConversationVAD extends EventEmitter {
       positiveSpeechThreshold: this.config.positiveSpeechThreshold,
       negativeSpeechThreshold: this.config.negativeSpeechThreshold,
       customVADEnabled: this.config.customVADEnabled,
+      facebookDenoiserEnabled: this.config.facebookDenoiserEnabled,
       rnnoiseEnabled: this.config.rnnoiseEnabled,
       preBufferDuration: this.preBufferDuration,
       preBufferMaxSamples: this.preBufferMaxSamples,
@@ -159,9 +184,34 @@ export class ConversationVAD extends EventEmitter {
     if (this.isInitialized) return;
 
     try {
-      console.log('🔧 Initializing Enhanced VAD service with RNNoise voice isolation...');
+      console.log('🔧 Initializing Enhanced VAD service with Facebook Denoiser + RNNoise voice isolation...');
       
-      // Initialize RNNoise service first (if enabled)
+      // Initialize Facebook Denoiser service first (if enabled)
+      if (this.config.facebookDenoiserEnabled) {
+        try {
+          console.log('🎤 Facebook Denoiser: Initializing voice isolation...');
+          this.facebookDenoiserService = getFacebookDenoiserService();
+          await this.facebookDenoiserService.initialize();
+          
+          if (this.facebookDenoiserService.isServiceEnabled()) {
+            console.log(`✅ Facebook Denoiser: Voice isolation active with superior noise suppression`);
+            
+            // Log initialization success with service stats
+            const fbStats = this.facebookDenoiserService.getStats();
+            console.log(`📊 Facebook Denoiser: Initialization stats - Restarts: ${fbStats.restarts}, Ready for processing`);
+          } else {
+            console.log('⚠️ Facebook Denoiser: Voice isolation disabled, will use RNNoise fallback');
+          }
+        } catch (error) {
+          console.warn('⚠️ Facebook Denoiser: Initialization failed, will use RNNoise fallback:', error);
+          this.facebookDenoiserService = null;
+          this.vadStats.facebookDenoiserErrors++;
+        }
+      } else {
+        console.log('🎤 Facebook Denoiser: Voice isolation disabled via configuration');
+      }
+      
+      // Initialize RNNoise service as fallback (if enabled)
       if (this.config.rnnoiseEnabled) {
         try {
           console.log('🎤 RNNoise: Initializing voice isolation...');
@@ -248,8 +298,8 @@ export class ConversationVAD extends EventEmitter {
       return null;
     }
 
-    // 🎤 RNNOISE VOICE ISOLATION - Process audio before VAD
-    const { enhancedAudio, rnnoiseDebugInfo } = await this.processWithRNNoise(float32Audio);
+    // 🎤 VOICE ISOLATION - Process audio before VAD (Facebook Denoiser → RNNoise fallback)
+    const { enhancedAudio, denoiseDebugInfo } = await this.processWithDenoising(float32Audio);
     
     // Add enhanced audio to rolling pre-buffer (always running)
     this.addToPreBuffer(enhancedAudio);
@@ -260,26 +310,37 @@ export class ConversationVAD extends EventEmitter {
     // Process with primary VAD provider using enhanced audio
     const vadResult = await this.processWithActiveVAD(enhancedAudio, timestamp);
     
-    // Include RNNoise debug info in VAD result
+    // Include denoising debug info in VAD result
     vadResult.debug = {
       ...vadResult.debug,
-      rnnoiseResult: rnnoiseDebugInfo
+      ...denoiseDebugInfo
     };
     
     return this.handleVADResult(vadResult, enhancedAudio, timestamp);
   }
 
   /**
-   * Process audio with RNNoise voice isolation
+   * Process audio with voice isolation (Facebook Denoiser primary, RNNoise fallback)
    * Returns enhanced audio and debug information
    */
-  private async processWithRNNoise(audioData: Float32Array): Promise<{
+  private async processWithDenoising(audioData: Float32Array): Promise<{
     enhancedAudio: Float32Array;
-    rnnoiseDebugInfo: any;
+    denoiseDebugInfo: any;
   }> {
     const startTime = performance.now();
     
-    // Initialize debug info
+    // Initialize debug info for both services
+    let facebookDenoiserDebugInfo = {
+      enabled: this.config.facebookDenoiserEnabled,
+      processed: false,
+      processingTime: 0,
+      success: false,
+      inputSamples: audioData.length,
+      outputSamples: audioData.length,
+      fallbackUsed: false,
+      errorMessage: undefined as string | undefined
+    };
+
     let rnnoiseDebugInfo = {
       enabled: this.config.rnnoiseEnabled,
       processed: false,
@@ -290,81 +351,181 @@ export class ConversationVAD extends EventEmitter {
       errorMessage: undefined as string | undefined
     };
 
-    // Return original audio if RNNoise is disabled or unavailable
-    if (!this.config.rnnoiseEnabled || !this.rnnoiseService || !this.rnnoiseService.isServiceEnabled()) {
-      rnnoiseDebugInfo.processingTime = performance.now() - startTime;
+    let enhancedAudio = audioData;
+    let usedFacebookDenoiser = false;
+    let usedRNNoise = false;
+
+    // Try Facebook Denoiser first (if enabled and available)
+    let fbStartTime = 0;
+    if (this.config.facebookDenoiserEnabled && this.facebookDenoiserService && this.facebookDenoiserService.isServiceEnabled()) {
+      try {
+        fbStartTime = performance.now();
+        
+        if (this.config.facebookDenoiserDebug && Math.random() < 0.1) {
+          console.log(`🔧 Facebook Denoiser: Processing ${audioData.length} samples...`);
+        }
+
+        const result = await this.facebookDenoiserService.processAudio(audioData);
+        
+        facebookDenoiserDebugInfo.processingTime = performance.now() - fbStartTime;
+        facebookDenoiserDebugInfo.processed = true;
+        facebookDenoiserDebugInfo.success = result.success;
+        facebookDenoiserDebugInfo.inputSamples = result.inputSamples;
+        facebookDenoiserDebugInfo.outputSamples = result.outputSamples;
+        
+        if (result.success && result.audio) {
+          enhancedAudio = result.audio;
+          usedFacebookDenoiser = true;
+          this.vadStats.facebookDenoiserSuccess++;
+
+          if (this.config.facebookDenoiserDebug && Math.random() < 0.05) {
+            // Analyze audio quality for comprehensive logging
+            const inputAnalysis = analyzeAudio(audioData, 'Float32@16kHz');
+            const outputAnalysis = analyzeAudio(enhancedAudio, 'Float32@16kHz');
+            const snrImprovement = ((outputAnalysis.rmsLevel - inputAnalysis.rmsLevel) / inputAnalysis.rmsLevel * 100);
+            
+            console.log(`✅ Facebook Denoiser: Audio enhanced successfully`);
+            console.log(`   Time: ${facebookDenoiserDebugInfo.processingTime.toFixed(2)}ms`);
+            console.log(`   Input:  RMS=${inputAnalysis.rmsLevel.toFixed(4)}, Peak=${inputAnalysis.peakLevel.toFixed(4)}, Silence=${(inputAnalysis.silenceRatio*100).toFixed(1)}%`);
+            console.log(`   Output: RMS=${outputAnalysis.rmsLevel.toFixed(4)}, Peak=${outputAnalysis.peakLevel.toFixed(4)}, Silence=${(outputAnalysis.silenceRatio*100).toFixed(1)}%`);
+            console.log(`   SNR Change: ${snrImprovement.toFixed(1)}% (${snrImprovement > 0 ? 'improved' : 'degraded'})`);
+          }
+        } else {
+          // Facebook Denoiser failed, will try RNNoise fallback
+          facebookDenoiserDebugInfo.errorMessage = result.error || 'Processing failed';
+          facebookDenoiserDebugInfo.fallbackUsed = true;
+          this.vadStats.facebookDenoiserErrors++;
+          
+          if (this.config.facebookDenoiserDebug) {
+            console.warn(`⚠️ Facebook Denoiser: Processing failed, will try RNNoise fallback: ${result.error}`);
+          }
+        }
+        
+      } catch (error) {
+        const fbEndTime = performance.now();
+        const errorMessage = error instanceof Error ? error.message : 'Unknown Facebook Denoiser error';
+        facebookDenoiserDebugInfo.processingTime = fbEndTime - fbStartTime;
+        facebookDenoiserDebugInfo.errorMessage = errorMessage;
+        facebookDenoiserDebugInfo.fallbackUsed = true;
+        this.vadStats.facebookDenoiserErrors++;
+        
+        console.warn(`⚠️ Facebook Denoiser: Processing exception, will try RNNoise fallback:`, errorMessage);
+      }
+    } else {
+      if (!this.config.facebookDenoiserEnabled) {
+        if (this.config.facebookDenoiserDebug) {
+          console.log('🎤 Facebook Denoiser: Skipped - disabled via configuration');
+        }
+      } else if (!this.facebookDenoiserService) {
+        console.warn('⚠️ Facebook Denoiser: Service not initialized');
+      } else {
+        console.warn('⚠️ Facebook Denoiser: Service disabled due to errors');
+      }
       
+      this.vadStats.facebookDenoiserSkipped++;
+    }
+
+    // Fallback to RNNoise if Facebook Denoiser failed or is disabled
+    if (!usedFacebookDenoiser && this.config.rnnoiseEnabled && this.rnnoiseService && this.rnnoiseService.isServiceEnabled()) {
+      try {
+        console.log(`⚠️ Facebook Denoiser failed, falling back to RNNoise for denoising`);
+        console.log(`📊 Fallback Stats: Facebook Denoiser failures=${this.vadStats.facebookDenoiserErrors}, RNNoise fallbacks=${this.vadStats.fallbacksToRnnoise + 1}`);
+        this.vadStats.fallbacksToRnnoise++;
+        
+        // Validate input audio
+        const validation = validateAudioData(enhancedAudio, 'Float32@16kHz');
+        if (!validation.isValid) {
+          console.warn('⚠️ RNNoise: Invalid input audio data:', validation.issues);
+          rnnoiseDebugInfo.errorMessage = `Invalid input: ${validation.issues.join(', ')}`;
+          this.vadStats.rnnoiseErrors++;
+        } else {
+          const rnnoiseStartTime = performance.now();
+
+          // Convert 16kHz Float32 to 48kHz Float32 for RNNoise
+          const { audio: audio48k, stats: inputStats } = resampleFloat32_16to48kHz(enhancedAudio);
+          rnnoiseDebugInfo.inputStats = inputStats;
+
+          if (this.config.rnnoiseDebug && Math.random() < 0.1) {
+            console.log(`🔧 RNNoise: Processing ${inputStats.inputSamples} samples (16kHz) → ${inputStats.outputSamples} samples (48kHz)`);
+          }
+
+          // Process with RNNoise
+          const processedAudio48k = await this.rnnoiseService!.processAudio(audio48k);
+          
+          // Convert back from 48kHz to 16kHz
+          const { audio: enhancedAudio16k, stats: outputStats } = resampleFloat32_48to16kHz(processedAudio48k);
+          rnnoiseDebugInfo.outputStats = outputStats;
+
+          // Calculate processing time
+          rnnoiseDebugInfo.processingTime = performance.now() - rnnoiseStartTime;
+          rnnoiseDebugInfo.processed = true;
+          
+          // Update success stats
+          this.vadStats.rnnoiseSuccess++;
+          enhancedAudio = enhancedAudio16k;
+          usedRNNoise = true;
+
+          if (this.config.rnnoiseDebug && Math.random() < 0.05) { // Debug 5% of requests
+            const inputAnalysis = analyzeAudio(audioData, 'Float32@16kHz');
+            const outputAnalysis = analyzeAudio(enhancedAudio16k, 'Float32@16kHz');
+            
+            console.log(`✅ RNNoise: Audio enhanced successfully - Time: ${rnnoiseDebugInfo.processingTime.toFixed(2)}ms, Provider: ${rnnoiseDebugInfo.provider}`);
+            console.log(`   Input:  RMS=${inputAnalysis.rmsLevel.toFixed(4)}, Peak=${inputAnalysis.peakLevel.toFixed(4)}, Silence=${(inputAnalysis.silenceRatio*100).toFixed(1)}%`);
+            console.log(`   Output: RMS=${outputAnalysis.rmsLevel.toFixed(4)}, Peak=${outputAnalysis.peakLevel.toFixed(4)}, Silence=${(outputAnalysis.silenceRatio*100).toFixed(1)}%`);
+          }
+        }
+
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown RNNoise error';
+        const rnnoiseEndTime = performance.now();
+        
+        console.warn(`⚠️ RNNoise: Processing failed (${(rnnoiseEndTime - startTime).toFixed(2)}ms):`, errorMessage);
+        
+        // Update error stats
+        this.vadStats.rnnoiseErrors++;
+        rnnoiseDebugInfo.processingTime = rnnoiseEndTime - startTime;
+        rnnoiseDebugInfo.errorMessage = errorMessage;
+      }
+    } else {
+      // RNNoise not available
       if (!this.config.rnnoiseEnabled) {
         if (this.config.rnnoiseDebug) {
           console.log('🎤 RNNoise: Skipped - disabled via configuration');
         }
       } else if (!this.rnnoiseService) {
-        console.warn('⚠️ RNNoise: Service not initialized, using original audio');
+        console.warn('⚠️ RNNoise: Service not initialized');
       } else {
-        console.warn('⚠️ RNNoise: Service disabled due to errors, using original audio');
+        console.warn('⚠️ RNNoise: Service disabled due to errors');
       }
       
       this.vadStats.rnnoiseSkipped++;
-      return { enhancedAudio: audioData, rnnoiseDebugInfo };
     }
 
-    try {
-      // Validate input audio
-      const validation = validateAudioData(audioData, 'Float32@16kHz');
-      if (!validation.isValid) {
-        console.warn('⚠️ RNNoise: Invalid input audio data:', validation.issues);
-        rnnoiseDebugInfo.errorMessage = `Invalid input: ${validation.issues.join(', ')}`;
-        this.vadStats.rnnoiseErrors++;
-        return { enhancedAudio: audioData, rnnoiseDebugInfo };
+    // Calculate total processing time
+    const totalProcessingTime = performance.now() - startTime;
+
+    // Log final processing results
+    if (this.config.facebookDenoiserDebug || this.config.rnnoiseDebug) {
+      let processingMethod = 'Original';
+      if (usedFacebookDenoiser) {
+        processingMethod = 'Facebook Denoiser';
+      } else if (usedRNNoise) {
+        processingMethod = 'RNNoise (fallback)';
       }
-
-      // Convert 16kHz Float32 to 48kHz Float32 for RNNoise
-      const { audio: audio48k, stats: inputStats } = resampleFloat32_16to48kHz(audioData);
-      rnnoiseDebugInfo.inputStats = inputStats;
-
-      if (this.config.rnnoiseDebug && Math.random() < 0.1) {
-        console.log(`🔧 RNNoise: Processing ${inputStats.inputSamples} samples (16kHz) → ${inputStats.outputSamples} samples (48kHz)`);
+      
+      if (Math.random() < 0.05) { // Log 5% of requests
+        console.log(`🎤 Voice Isolation Complete: ${processingMethod} (${totalProcessingTime.toFixed(2)}ms total)`);
       }
-
-      // Process with RNNoise
-      const processedAudio48k = await this.rnnoiseService.processAudio(audio48k);
-      
-      // Convert back from 48kHz to 16kHz
-      const { audio: enhancedAudio16k, stats: outputStats } = resampleFloat32_48to16kHz(processedAudio48k);
-      rnnoiseDebugInfo.outputStats = outputStats;
-
-      // Calculate processing time
-      rnnoiseDebugInfo.processingTime = performance.now() - startTime;
-      rnnoiseDebugInfo.processed = true;
-      
-      // Update success stats
-      this.vadStats.rnnoiseSuccess++;
-
-      if (this.config.rnnoiseDebug && Math.random() < 0.05) { // Debug 5% of requests
-        const inputAnalysis = analyzeAudio(audioData, 'Float32@16kHz');
-        const outputAnalysis = analyzeAudio(enhancedAudio16k, 'Float32@16kHz');
-        
-        console.log(`✅ RNNoise: Audio enhanced successfully - Time: ${rnnoiseDebugInfo.processingTime.toFixed(2)}ms, Provider: ${rnnoiseDebugInfo.provider}`);
-        console.log(`   Input:  RMS=${inputAnalysis.rmsLevel.toFixed(4)}, Peak=${inputAnalysis.peakLevel.toFixed(4)}, Silence=${(inputAnalysis.silenceRatio*100).toFixed(1)}%`);
-        console.log(`   Output: RMS=${outputAnalysis.rmsLevel.toFixed(4)}, Peak=${outputAnalysis.peakLevel.toFixed(4)}, Silence=${(outputAnalysis.silenceRatio*100).toFixed(1)}%`);
-      }
-
-      return { enhancedAudio: enhancedAudio16k, rnnoiseDebugInfo };
-
-    } catch (error) {
-      const processingTime = performance.now() - startTime;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown RNNoise error';
-      
-      console.warn(`⚠️ RNNoise: Processing failed (${processingTime.toFixed(2)}ms):`, errorMessage);
-      
-      // Update error stats
-      this.vadStats.rnnoiseErrors++;
-      rnnoiseDebugInfo.processingTime = processingTime;
-      rnnoiseDebugInfo.errorMessage = errorMessage;
-
-      // Graceful fallback - return original audio
-      return { enhancedAudio: audioData, rnnoiseDebugInfo };
     }
+
+    // Return combined debug info
+    const denoiseDebugInfo = {
+      facebookDenoiserResult: facebookDenoiserDebugInfo,
+      rnnoiseResult: rnnoiseDebugInfo,
+      fallbackUsed: !usedFacebookDenoiser && (usedRNNoise || (!usedFacebookDenoiser && !usedRNNoise))
+    };
+
+    return { enhancedAudio, denoiseDebugInfo };
   }
   
   private convertPCM16ToFloat32(audioData: Buffer): Float32Array {
@@ -700,6 +861,11 @@ export class ConversationVAD extends EventEmitter {
       currentProvider: this.currentProvider,
       sileroReady: this.sileroVAD?.isReady() || false,
       sileroStateInfo: this.sileroVAD?.getStateInfo() || null,
+      // Facebook Denoiser stats
+      facebookDenoiserEnabled: this.config.facebookDenoiserEnabled,
+      facebookDenoiserServiceEnabled: this.facebookDenoiserService?.isServiceEnabled() || false,
+      facebookDenoiserServiceStats: this.facebookDenoiserService?.getStats() || null,
+      // RNNoise stats
       rnnoiseEnabled: this.config.rnnoiseEnabled,
       rnnoiseServiceEnabled: this.rnnoiseService?.isServiceEnabled() || false,
       rnnoiseActiveProvider: this.rnnoiseService?.getActiveProvider() || null,
@@ -728,13 +894,19 @@ export class ConversationVAD extends EventEmitter {
       this.sileroVAD = null;
     }
     
+    // Cleanup Facebook Denoiser service (shared instance, so don't destroy globally)
+    if (this.facebookDenoiserService) {
+      // Just null the reference - the service is managed globally
+      this.facebookDenoiserService = null;
+    }
+    
     // Cleanup RNNoise service (shared instance, so don't destroy globally)
     if (this.rnnoiseService) {
       // Just null the reference - the service is managed globally
       this.rnnoiseService = null;
     }
     
-    console.log('🧹 Enhanced VAD service destroyed (with RNNoise integration)');
+    console.log('🧹 Enhanced VAD service destroyed (with Facebook Denoiser + RNNoise integration)');
   }
 }
 
@@ -748,14 +920,17 @@ export function getOptimalVADConfig(scenario: {
   language?: 'hindi' | 'english' | 'mixed';
   environment?: 'quiet' | 'noisy' | 'variable';
   sensitivity?: 'low' | 'medium' | 'high';
+  facebookDenoiserEnabled?: boolean;
   rnnoiseEnabled?: boolean;
 }): Partial<VADConfig> {
-  const { language = 'mixed', environment = 'variable', sensitivity = 'medium', rnnoiseEnabled = true } = scenario;
+  const { language = 'mixed', environment = 'variable', sensitivity = 'medium', facebookDenoiserEnabled = true, rnnoiseEnabled = true } = scenario;
   
   let config: Partial<VADConfig> = {
     provider: 'auto', // Let system choose best provider
     model: 'v5',
-    rnnoiseEnabled, // Enable RNNoise by default for better noise suppression
+    facebookDenoiserEnabled, // Enable Facebook Denoiser by default for superior noise suppression
+    facebookDenoiserDebug: false,
+    rnnoiseEnabled, // Enable RNNoise as fallback
     rnnoiseDebug: false,
   };
   
@@ -788,7 +963,10 @@ export function getOptimalVADConfig(scenario: {
   if (environment === 'noisy') {
     config.positiveSpeechThreshold! += 0.1;
     config.energyThreshold! *= 2;
-    // Enable RNNoise debug for noisy environments to monitor effectiveness
+    // Enable denoising debug for noisy environments to monitor effectiveness
+    if (facebookDenoiserEnabled) {
+      config.facebookDenoiserDebug = true;
+    }
     if (rnnoiseEnabled) {
       config.rnnoiseDebug = true;
     }

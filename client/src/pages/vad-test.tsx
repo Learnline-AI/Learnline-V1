@@ -652,7 +652,7 @@ export default function VADTestPage() {
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="text-center">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Complete Audio Pipeline Test</h1>
-          <p className="text-gray-600">Test RNNoise + VAD + STT + AI + TTS Pipeline with WebSocket</p>
+          <p className="text-gray-600">Test Facebook Denoiser + RNNoise + VAD + STT + AI + TTS Pipeline with WebSocket</p>
           
           {/* Navigation help */}
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-4">
@@ -684,7 +684,7 @@ export default function VADTestPage() {
                 {isConnected ? (
                   <>
                     <CheckCircle className="w-5 h-5 text-green-500" />
-                    Connected to Enhanced VAD Server
+                    Connected to Enhanced VAD Server (Facebook Denoiser + RNNoise)
                   </>
                 ) : (
                   <>
@@ -1092,6 +1092,57 @@ export default function VADTestPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
+                {/* Facebook Denoiser Results */}
+                {vadDebugInfo.facebookDenoiserResult && (
+                  <div className="border rounded p-3 bg-purple-50">
+                    <div className="font-medium text-sm text-purple-800 mb-2">
+                      🎤 Facebook Denoiser Result
+                      {vadDebugInfo.facebookDenoiserResult.success ? 
+                        <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded">SUCCESS</span> :
+                        <span className="ml-2 text-xs bg-red-100 text-red-700 px-2 py-1 rounded">FAILED</span>
+                      }
+                    </div>
+                    <div className="text-xs space-y-1">
+                      <div>Enabled: {vadDebugInfo.facebookDenoiserResult.enabled?.toString()}</div>
+                      <div>Processed: {vadDebugInfo.facebookDenoiserResult.processed?.toString()}</div>
+                      <div>Processing Time: {vadDebugInfo.facebookDenoiserResult.processingTime?.toFixed(2)}ms</div>
+                      <div>Input Samples: {vadDebugInfo.facebookDenoiserResult.inputSamples}</div>
+                      <div>Output Samples: {vadDebugInfo.facebookDenoiserResult.outputSamples}</div>
+                      {vadDebugInfo.facebookDenoiserResult.fallbackUsed && (
+                        <div className="text-red-600">⚠️ Fallback Used</div>
+                      )}
+                      {vadDebugInfo.facebookDenoiserResult.errorMessage && (
+                        <div className="text-red-600">Error: {vadDebugInfo.facebookDenoiserResult.errorMessage}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* RNNoise Results */}
+                {vadDebugInfo.rnnoiseResult && (
+                  <div className="border rounded p-3 bg-indigo-50">
+                    <div className="font-medium text-sm text-indigo-800 mb-2">
+                      🎤 RNNoise Result (Fallback)
+                      {vadDebugInfo.rnnoiseResult.processed ? 
+                        <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded">PROCESSED</span> :
+                        <span className="ml-2 text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded">SKIPPED</span>
+                      }
+                    </div>
+                    <div className="text-xs space-y-1">
+                      <div>Enabled: {vadDebugInfo.rnnoiseResult.enabled?.toString()}</div>
+                      <div>Processed: {vadDebugInfo.rnnoiseResult.processed?.toString()}</div>
+                      <div>Processing Time: {vadDebugInfo.rnnoiseResult.processingTime?.toFixed(2)}ms</div>
+                      <div>Provider: {vadDebugInfo.rnnoiseResult.provider || 'N/A'}</div>
+                      {vadDebugInfo.rnnoiseResult.inputStats && (
+                        <div>Input Stats: {vadDebugInfo.rnnoiseResult.inputStats.inputSamples} → {vadDebugInfo.rnnoiseResult.inputStats.outputSamples} samples</div>
+                      )}
+                      {vadDebugInfo.rnnoiseResult.errorMessage && (
+                        <div className="text-red-600">Error: {vadDebugInfo.rnnoiseResult.errorMessage}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {vadDebugInfo.sileroResult && (
                   <div className="border rounded p-3 bg-green-50">
                     <div className="font-medium text-sm text-green-800 mb-2">Silero ONNX Result</div>
@@ -1115,9 +1166,23 @@ export default function VADTestPage() {
                   </div>
                 )}
                 
+                {/* Denoising Fallback Status */}
                 {vadDebugInfo.fallbackUsed && (
                   <div className="border rounded p-3 bg-yellow-50">
-                    <div className="font-medium text-sm text-yellow-800">⚠️ Fallback VAD Used</div>
+                    <div className="font-medium text-sm text-yellow-800">⚠️ Denoising Fallback Used</div>
+                    <div className="text-xs text-yellow-700">
+                      {vadDebugInfo.facebookDenoiserResult?.fallbackUsed ? 
+                        'Facebook Denoiser failed, using RNNoise fallback' :
+                        'Both Facebook Denoiser and RNNoise failed, using original audio'
+                      }
+                    </div>
+                  </div>
+                )}
+
+                {/* VAD Fallback Status */}
+                {vadDebugInfo.fallbackUsed && !vadDebugInfo.facebookDenoiserResult?.fallbackUsed && (
+                  <div className="border rounded p-3 bg-yellow-50">
+                    <div className="font-medium text-sm text-yellow-800">⚠️ VAD Fallback Used</div>
                     <div className="text-xs text-yellow-700">Silero VAD failed, using Custom VAD</div>
                   </div>
                 )}
@@ -1129,7 +1194,7 @@ export default function VADTestPage() {
         {/* Instructions */}
         <Card>
           <CardHeader>
-            <CardTitle>Enhanced Q&A with Concurrent I/O Instructions</CardTitle>
+            <CardTitle>Enhanced Q&A with Facebook Denoiser + Concurrent I/O Instructions</CardTitle>
           </CardHeader>
           <CardContent>
             <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
@@ -1139,26 +1204,29 @@ export default function VADTestPage() {
               <li>Start/Stop recording to test voice activity detection</li>
               <li>Speak into your microphone - experience the full optimized pipeline:</li>
               <ul className="list-disc list-inside ml-4 space-y-1">
-                <li><strong>Sequential:</strong> RNNoise voice isolation → VAD detection</li>
+                <li><strong>Sequential:</strong> Facebook Denoiser (primary) → RNNoise (fallback) → VAD detection</li>
                 <li><strong>Concurrent:</strong> STT + Context Fetching + Emotion Analysis (parallel)</li>
                 <li><strong>Live AI Responses:</strong> Real Q&A with Ravi Bhaiya powered by optimized processing</li>
                 <li><strong>Smart TTS:</strong> Language-aware text-to-speech audio playback</li>
               </ul>
               <li>Monitor performance metrics showing time savings from concurrent operations</li>
               <li>Watch real-time operation status updates during AI processing</li>
-              <li>Use debug panel to see detailed VAD processing information</li>
+              <li>Use debug panel to see detailed Facebook Denoiser + RNNoise processing information</li>
               <li>Experience faster responses through concurrent I/O optimization</li>
             </ol>
             <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded">
               <div className="text-sm font-medium text-green-800">✅ Enhanced Features:</div>
               <ul className="text-xs text-green-700 mt-1 space-y-1">
                 <li>• <strong>Live Q&A Enabled:</strong> Full AI conversation functionality with Ravi Bhaiya</li>
+                <li>• <strong>Facebook Denoiser:</strong> Superior noise suppression using Demucs DNS64 model</li>
+                <li>• <strong>Intelligent Fallback:</strong> Automatic fallback to RNNoise if Facebook Denoiser fails</li>
                 <li>• <strong>Concurrent I/O Optimization:</strong> STT, Context, and Emotion analysis run in parallel</li>
                 <li>• <strong>Performance Monitoring:</strong> Real-time timing comparisons and metrics</li>
                 <li>• <strong>Operation Tracking:</strong> Live status updates for each concurrent operation</li>
                 <li>• <strong>Time Savings Display:</strong> Shows improvement percentage from concurrent processing</li>
                 <li>• <strong>Smart TTS:</strong> Hindi/English language detection with appropriate voices</li>
                 <li>• <strong>VAD Preservation:</strong> All voice activity detection features remain intact</li>
+                <li>• <strong>Enhanced Debug Panel:</strong> Detailed Facebook Denoiser and RNNoise processing information</li>
                 <li>• <strong>Error Handling:</strong> Graceful fallbacks if concurrent operations fail</li>
               </ul>
             </div>

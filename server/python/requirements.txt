@@ -1,0 +1,20 @@
+# Facebook Denoiser (Demucs) Requirements
+torch>=2.0.0
+torchaudio>=2.0.0
+demucs>=4.0.0
+numpy>=1.21.0
+scipy>=1.7.0
+soundfile>=0.10.3
+
+# Alternative lightweight option if full Demucs is too heavy
+# speechbrain>=0.5.0  # SpeechBrain has DNS models
+
+# Core dependencies
+json5>=0.9.0
+base64
+
+# For audio processing
+librosa>=0.9.0
+
+# Performance monitoring (optional)
+psutil>=5.8.0
