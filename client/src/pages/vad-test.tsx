@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Mic, MicOff, Activity, AlertCircle, CheckCircle, Settings, BarChart3, RefreshCw, Play, Volume2, VolumeX, Wifi, WifiOff } from 'lucide-react';
 import { ChatBubble, TypingIndicator } from '@/components/ChatBubble';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
-import { usePipecatWebSocket } from '@/hooks/usePipecatWebSocket';
+import { useSimpleWebSocket } from '@/hooks/useSimpleWebSocket';
 import { ChatMessage } from '@/types';
 import { apiService } from '@/lib/apiService';
 
@@ -87,73 +87,98 @@ export default function VADTestPage() {
   const [currentAIResponse, setCurrentAIResponse] = useState<string>('');
   const [aiResponseComplete, setAiResponseComplete] = useState<boolean>(false);
 
-  // Pipecat WebSocket integration for real-time audio streaming
+  // Simple WebSocket integration for real-time audio streaming
   const {
+    socket,
     connect,
     disconnect,
-    sendAudioFrame,
-    requestStats,
-    onConnection,
-    onDisconnection,
-    onError,
-    onStats,
+    sendAudioData,
+    sendTextInput,
     connectionStatus,
     error,
-    sessionInfo,
     stats: wsStats,
     isConnected,
     isConnecting
-  } = usePipecatWebSocket({
+  } = useSimpleWebSocket({
     autoReconnect: true,
     maxReconnectAttempts: 5,
     reconnectInterval: 1000
   });
 
-  // Temporary placeholders for Pipecat migration (will be implemented later)
-  const vadProvider = sessionInfo?.sessionId ? 'pipecat' : 'disconnected';
-  const vadConfig = sessionInfo?.config;
-  const lastVADEvent = null; // Placeholder - VAD events will be implemented later
-  const vadStats = null; // Placeholder - VAD stats will be implemented later
+  // Simple WebSocket placeholders
+  const vadProvider = isConnected ? 'websocket' : 'disconnected';
+  const vadConfig = isConnected ? {
+    model: 'simple-vad',
+    sampleRate: 16000,
+    provider: 'websocket',
+    positiveSpeechThreshold: 0.5,
+    negativeSpeechThreshold: 0.35,
+    minSpeechDuration: 1000,
+    minSilenceDuration: 800,
+    sileroReady: true
+  } : null;
+  const lastVADEvent = null;
+  const vadStats = null;
   const providerSwitching = false;
 
-  // Pipecat WebSocket event handlers setup
+  // Simple WebSocket event handlers setup
   useEffect(() => {
-    // Connect to Pipecat WebSocket server when component mounts
-    console.log('🔌 Connecting to Pipecat WebSocket server...');
+    // Connect to WebSocket server when component mounts
+    console.log('🔌 Connecting to WebSocket server...');
     connect();
-
-    // Set up simplified event handlers for connection management
-    onConnection((sessionId) => {
-      console.log('✅ PipecatClient: Connected with session:', sessionId);
-      setConversationState('idle');
-    });
-
-    onDisconnection((sessionId) => {
-      console.log('🔌 PipecatClient: Disconnected from session:', sessionId);
-      setConversationState('idle');
-    });
-
-    onError((error) => {
-      console.error('❌ PipecatClient: Error:', error);
-      setConversationState('idle');
-    });
-
-    onStats((stats) => {
-      console.log('📊 PipecatClient: Stats received:', stats);
-    });
 
     // Cleanup on unmount
     return () => {
       disconnect();
     };
-  }, [connect, disconnect, onConnection, onDisconnection, onError, onStats]);
+  }, [connect, disconnect]);
 
-  // Basic recording functions for Pipecat WebSocket testing
+  // Handle WebSocket events
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('connected', (data) => {
+      console.log('✅ WebSocket connected:', data);
+      setConversationState('idle');
+    });
+
+    socket.on('transcription', (data) => {
+      console.log('🎤 Transcription received:', data.text);
+      setTranscript(data.text);
+      handleConcurrentTranscription(data.text);
+    });
+
+    socket.on('ai_response', (data) => {
+      console.log('🤖 AI response received:', data.text);
+      setCurrentAIResponse(data.text);
+    });
+
+    socket.on('audio_response', (data) => {
+      console.log('🔊 Audio response ready:', data.audioUrl.substring(0, 50) + '...');
+      if (data.audioUrl) {
+        playAudio(data.audioUrl);
+      }
+    });
+
+    socket.on('error', (data) => {
+      console.error('❌ WebSocket error:', data.message);
+    });
+
+    return () => {
+      socket.off('connected');
+      socket.off('transcription');
+      socket.off('ai_response');
+      socket.off('audio_response');
+      socket.off('error');
+    };
+  }, [socket, playAudio]);
+
+  // Simple WebSocket recording functions
   const startRecording = async () => {
     try {
       setIsRecording(true);
       setConversationState('listening');
-      console.log('🎤 Started recording for Pipecat WebSocket test');
+      console.log('🎤 Started recording for WebSocket test');
       
       // Get media stream
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -181,6 +206,28 @@ export default function VADTestPage() {
       // Connect for visualization
       source.connect(analyzerRef.current);
       
+      // Setup audio processing for WebSocket
+      processorRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      processorRef.current.onaudioprocess = (event) => {
+        if (!isRecording || !socket?.connected) return;
+        
+        const inputBuffer = event.inputBuffer;
+        const inputData = inputBuffer.getChannelData(0);
+        
+        // Convert to base64 for WebSocket transmission
+        const buffer = new ArrayBuffer(inputData.length * 2);
+        const view = new Int16Array(buffer);
+        for (let i = 0; i < inputData.length; i++) {
+          view[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+        }
+        
+        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+        sendAudioData(base64Audio);
+      };
+      
+      source.connect(processorRef.current);
+      processorRef.current.connect(audioContextRef.current.destination);
+      
       updateAudioLevel();
       setConversationStarted(true);
       
@@ -195,6 +242,11 @@ export default function VADTestPage() {
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
+    }
+
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
     }
 
     if (audioContextRef.current) {
@@ -521,7 +573,7 @@ export default function VADTestPage() {
   
   const refreshStats = () => {
     if (isConnected) {
-      requestStats();
+      console.log('📊 Current WebSocket stats:', wsStats);
     }
   };
   

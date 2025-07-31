@@ -1268,5 +1268,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   const httpServer = createServer(app);
+
+  // Initialize simple WebSocket audio server
+  console.log('🚀 Initializing simple audio WebSocket...');
+  const { SimpleAudioWebSocket } = await import('./websocket/audioWebSocket');
+  const audioWebSocket = new SimpleAudioWebSocket(httpServer);
+  console.log('✅ Simple audio WebSocket initialized');
+
   return httpServer;
 }

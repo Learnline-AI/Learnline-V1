@@ -104,44 +104,6 @@ app.use((req, res, next) => {
   const server = await registerRoutes(app);
   console.log('✅ API routes registered successfully');
 
-  // Initialize Pipecat-inspired WebSocket transport
-  console.log('🚀 Initializing Pipecat WebSocket transport...');
-  const { createPipecatTransport } = await import('./websocket/pipecatWebSocket');
-  const pipecatTransport = createPipecatTransport(server, {
-    pingTimeout: 60000,
-    pingInterval: 25000,
-    maxHttpBufferSize: 10 * 1024 * 1024, // 10MB
-    sessionTimeout: 30 * 60 * 1000, // 30 minutes
-    heartbeatInterval: 30000, // 30 seconds
-    maxConcurrentSessions: 100
-  });
-
-  // Setup transport event handlers for integration with existing services
-  pipecatTransport.on('audio_frame_received', async (data) => {
-    const { sessionId, frame } = data;
-    console.log(`📥 PipecatTransport: Audio frame received [${sessionId}] - ${frame.data.length} bytes`);
-    
-    // Here we could integrate with existing unified pipeline or VAD services
-    // For now, we just acknowledge the frame was received
-    pipecatTransport.sendToSession(sessionId, 'frame_processed', {
-      timestamp: frame.timestamp,
-      status: 'received'
-    });
-  });
-
-  pipecatTransport.on('session_created', (data) => {
-    console.log(`✅ PipecatTransport: Session created [${data.sessionId}]`);
-  });
-
-  pipecatTransport.on('session_destroyed', (data) => {
-    console.log(`🧹 PipecatTransport: Session destroyed [${data.sessionId}]`);
-  });
-
-  pipecatTransport.on('error_occurred', (data) => {
-    console.error(`❌ PipecatTransport: Error [${data.sessionId}]:`, data.error);
-  });
-
-  console.log('✅ Pipecat WebSocket transport initialized successfully');
 
   app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

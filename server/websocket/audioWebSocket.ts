@@ -1,462 +1,179 @@
-// WebSocket Audio Streaming Server with Socket.IO
-import { Server as SocketIOServer, Socket } from 'socket.io';
+import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
-import { createVADInstance, ConversationVAD, VADEvent } from '../services/vadService';
-import { ConnectionManager } from './connectionManager';
-import { AudioProcessor } from './audioProcessor';
 import { generateAIResponse } from '../services/aiService';
+import { generateTTS } from '../services/ttsService';
+import { speechToTextService } from '../services/speechToTextService';
 import { SYSTEM_PROMPTS } from '../config/aiConfig';
 
-interface AudioChunkData {
-  audioData: string; // base64 encoded PCM16 audio
-  timestamp: number;
-  size: number;
-  samples: number;
-  format: 'pcm16';
-}
-
-interface SessionContext {
-  sessionId: string;
-  vadInstance: ConversationVAD;
-  audioProcessor: AudioProcessor;
-  isRecording: boolean;
+interface AudioSession {
+  id: string;
+  userId?: string;
+  isActive: boolean;
   lastActivity: number;
-  stats: {
-    chunksReceived: number;
-    bytesProcessed: number;
-    errors: number;
-    startTime: number;
-  };
 }
 
-export class AudioWebSocketServer {
+export class SimpleAudioWebSocket {
   private io: SocketIOServer;
-  private connectionManager: ConnectionManager;
-  private sessions: Map<string, SessionContext> = new Map();
-  private readonly HEARTBEAT_INTERVAL = 30000; // 30 seconds
-  private readonly SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
-  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private sessions: Map<string, AudioSession> = new Map();
+  private sessionTimeout = 5 * 60 * 1000; // 5 minutes
 
-  constructor(httpServer: HTTPServer) {
-    console.log('🔌 Initializing WebSocket Audio Server...');
-
-    // Initialize Socket.IO server with optimized configuration
-    this.io = new SocketIOServer(httpServer, {
+  constructor(server: HTTPServer) {
+    this.io = new SocketIOServer(server, {
       cors: {
-        origin: true,
-        credentials: true
+        origin: "*",
+        methods: ["GET", "POST"]
       },
-      transports: ['websocket', 'polling'],
-      pingTimeout: 60000,
-      pingInterval: 25000,
-      maxHttpBufferSize: 1e7, // 10MB for large audio chunks
-      allowEIO3: true
+      transports: ['websocket', 'polling']
     });
 
-    this.connectionManager = new ConnectionManager();
     this.setupEventHandlers();
-    this.startHeartbeat();
-
-    console.log('✅ WebSocket Audio Server initialized successfully');
+    this.startSessionCleanup();
   }
 
-  private setupEventHandlers(): void {
-    this.io.on('connection', (socket: Socket) => {
-      console.log(`🔌 WebSocket: New connection established [${socket.id}]`);
-      this.handleConnection(socket);
-    });
-  }
+  private setupEventHandlers() {
+    this.io.on('connection', (socket) => {
+      console.log(`🔌 WebSocket connected: ${socket.id}`);
+      
+      // Create session
+      const session: AudioSession = {
+        id: socket.id,
+        isActive: true,
+        lastActivity: Date.now()
+      };
+      this.sessions.set(socket.id, session);
 
-  private async handleConnection(socket: Socket): Promise<void> {
-    const sessionId = socket.id;
-    
-    try {
-      // Create VAD instance for this session
-      const vadInstance = createVADInstance({
-        provider: 'auto',
-        facebookDenoiserEnabled: true,
-        rnnoiseEnabled: true,
-        facebookDenoiserDebug: false,
-        rnnoiseDebug: false
+      // Handle audio data
+      socket.on('audio_data', async (data) => {
+        try {
+          await this.handleAudioData(socket.id, data);
+        } catch (error) {
+          console.error('Error processing audio:', error);
+          socket.emit('error', { message: 'Audio processing failed' });
+        }
       });
 
-      await vadInstance.initialize();
-
-      // Create audio processor for this session
-      const audioProcessor = new AudioProcessor(vadInstance);
-
-      // Create session context
-      const sessionContext: SessionContext = {
-        sessionId,
-        vadInstance,
-        audioProcessor,
-        isRecording: false,
-        lastActivity: Date.now(),
-        stats: {
-          chunksReceived: 0,
-          bytesProcessed: 0,
-          errors: 0,
-          startTime: Date.now()
+      // Handle text input
+      socket.on('text_input', async (data) => {
+        try {
+          await this.handleTextInput(socket.id, data.text);
+        } catch (error) {
+          console.error('Error processing text:', error);
+          socket.emit('error', { message: 'Text processing failed' });
         }
-      };
+      });
 
-      this.sessions.set(sessionId, sessionContext);
-      this.connectionManager.addConnection(socket);
-
-      // Setup VAD event handlers
-      this.setupVADEventHandlers(socket, sessionContext);
+      // Handle disconnect
+      socket.on('disconnect', () => {
+        console.log(`🔌 WebSocket disconnected: ${socket.id}`);
+        this.sessions.delete(socket.id);
+      });
 
       // Send connection confirmation
-      socket.emit('connected', {
-        sessionId,
-        vadProvider: vadInstance.getCurrentProvider(),
-        vadStats: vadInstance.getVADStats(),
-        vadConfig: {
-          sampleRate: 16000,
-          model: 'v5',
-          provider: vadInstance.getCurrentProvider(),
-          positiveSpeechThreshold: 0.5,
-          negativeSpeechThreshold: 0.35,
-          minSpeechDuration: 1000,
-          minSilenceDuration: 800,
-          sileroReady: vadInstance.getVADStats().sileroReady
-        }
-      });
+      socket.emit('connected', { sessionId: socket.id });
+    });
+  }
 
-      console.log(`✅ WebSocket: Session initialized [${sessionId}] - VAD: ${vadInstance.getCurrentProvider()}`);
+  private async handleAudioData(sessionId: string, audioData: any) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
 
-      // Setup socket event handlers
-      this.setupSocketEventHandlers(socket, sessionContext);
+    session.lastActivity = Date.now();
 
-    } catch (error) {
-      console.error(`❌ WebSocket: Failed to initialize session [${sessionId}]:`, error);
-      socket.emit('error', { message: 'Failed to initialize audio session' });
-      socket.disconnect();
+    // Convert base64 to buffer if needed
+    let audioBuffer: Buffer;
+    if (typeof audioData === 'string') {
+      audioBuffer = Buffer.from(audioData, 'base64');
+    } else if (audioData.audio) {
+      audioBuffer = Buffer.from(audioData.audio, 'base64');
+    } else {
+      audioBuffer = Buffer.from(audioData);
     }
-  }
 
-  private setupVADEventHandlers(socket: Socket, context: SessionContext): void {
-    const { vadInstance, sessionId } = context;
-
-    vadInstance.on('speech_start', (event: VADEvent) => {
-      console.log(`🎤 WebSocket: Speech started [${sessionId}]`);
-      socket.emit('vad_event', event);
-      socket.emit('conversation_state', { state: 'listening' });
-    });
-
-    vadInstance.on('speech_end', (event: VADEvent) => {
-      console.log(`🔇 WebSocket: Speech ended [${sessionId}]`);
-      socket.emit('vad_event', event);
-      socket.emit('conversation_state', { state: 'processing' });
-      
-      // Process collected audio for transcription
-      if (event.data.audioChunk) {
-        this.processCollectedAudio(socket, context, event.data.audioChunk);
-      }
-    });
-
-    vadInstance.on('speech_chunk', (event: VADEvent) => {
-      socket.emit('vad_event', event);
-    });
-
-    vadInstance.on('state_change', (event: VADEvent) => {
-      socket.emit('conversation_state', { state: event.data.state });
-    });
-  }
-
-  private setupSocketEventHandlers(socket: Socket, context: SessionContext): void {
-    const { sessionId } = context;
-
-    // Handle incoming audio chunks
-    socket.on('audio_chunk', async (data: AudioChunkData) => {
-      await this.handleAudioChunk(socket, context, data);
-    });
-
-    // Handle VAD provider switching
-    socket.on('switch_vad_provider', async (data: { provider: 'silero' | 'custom' }) => {
-      await this.handleProviderSwitch(socket, context, data.provider);
-    });
-
-    // Handle VAD stats request
-    socket.on('get_vad_stats', () => {
-      const stats = context.vadInstance.getVADStats();
-      socket.emit('vad_stats', {
-        stats,
-        provider: context.vadInstance.getCurrentProvider(),
-        state: context.vadInstance.getCurrentState()
-      });
-    });
-
-    // Handle disconnection
-    socket.on('disconnect', (reason) => {
-      console.log(`🔌 WebSocket: Connection disconnected [${sessionId}] - Reason: ${reason}`);
-      this.handleDisconnection(sessionId);
-    });
-
-    // Handle errors
-    socket.on('error', (error) => {
-      console.error(`❌ WebSocket: Socket error [${sessionId}]:`, error);
-      context.stats.errors++;
-    });
-
-    // Handle ping/pong for connection health
-    socket.on('ping', () => {
-      socket.emit('pong', { timestamp: Date.now() });
-    });
-  }
-
-  private async handleAudioChunk(socket: Socket, context: SessionContext, data: AudioChunkData): Promise<void> {
-    const { sessionId, vadInstance, stats } = context;
-
+    // Process audio through speech-to-text
     try {
-      // Update activity timestamp
-      context.lastActivity = Date.now();
-      stats.chunksReceived++;
-      stats.bytesProcessed += data.size;
-
-      // Validate audio chunk data
-      if (!data.audioData || data.format !== 'pcm16') {
-        throw new Error(`Invalid audio format: ${data.format}`);
-      }
-
-      // Decode base64 audio data to buffer
-      const audioBuffer = Buffer.from(data.audioData, 'base64');
+      const audioBase64 = audioBuffer.toString('base64');
       
-      if (audioBuffer.length === 0) {
-        console.warn(`⚠️ WebSocket: Empty audio chunk received [${sessionId}]`);
-        return;
-      }
-
-      // Log occasionally for monitoring
-      if (stats.chunksReceived % 100 === 0) {
-        const duration = Date.now() - stats.startTime;
-        const avgBytesPerSec = Math.round((stats.bytesProcessed / duration) * 1000);
-        console.log(`📊 Audio Stream: [${sessionId}] ${stats.chunksReceived} chunks, ${Math.round(stats.bytesProcessed/1024)}KB, ${avgBytesPerSec}B/s`);
-      }
-
-      // Process audio with VAD
-      const vadEvent = await vadInstance.processAudioChunk(audioBuffer);
-      
-      if (vadEvent) {
-        // VAD event will be emitted through the event handlers we set up
-        // No need to emit here as it's handled by setupVADEventHandlers
-      }
-
-    } catch (error) {
-      console.error(`❌ WebSocket: Error processing audio chunk [${sessionId}]:`, error);
-      stats.errors++;
-      
-      socket.emit('error', { 
-        message: `Audio processing failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
+      // Use the same API call format as the HTTP endpoint
+      const sttResponse = await fetch('http://localhost:3000/api/speech-to-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio: audioBase64,
+          language: 'hi-IN',
+          mimeType: 'audio/pcm;codecs=pcm'
+        })
       });
-    }
-  }
-
-  private async handleProviderSwitch(socket: Socket, context: SessionContext, provider: 'silero' | 'custom'): Promise<void> {
-    const { sessionId, vadInstance } = context;
-
-    try {
-      console.log(`🔄 WebSocket: Switching VAD provider to ${provider} [${sessionId}]`);
       
-      const success = await vadInstance.switchProvider(provider);
-      const stats = vadInstance.getVADStats();
-
-      socket.emit('vad_provider_switched', {
-        success,
-        provider: vadInstance.getCurrentProvider(),
-        stats
-      });
-
-      if (success) {
-        console.log(`✅ WebSocket: VAD provider switched to ${provider} [${sessionId}]`);
-      } else {
-        console.warn(`⚠️ WebSocket: Failed to switch VAD provider to ${provider} [${sessionId}]`);
-      }
-
-    } catch (error) {
-      console.error(`❌ WebSocket: Error switching VAD provider [${sessionId}]:`, error);
-      socket.emit('error', { message: 'Failed to switch VAD provider' });
-    }
-  }
-
-  private async processCollectedAudio(socket: Socket, context: SessionContext, audioBuffer: Buffer): Promise<void> {
-    const { sessionId } = context;
-
-    try {
-      console.log(`🔄 WebSocket: Processing collected audio [${sessionId}] - ${audioBuffer.length} bytes`);
-
-      // Process audio through AudioProcessor for transcription
-      const result = await context.audioProcessor.processCollectedAudio(audioBuffer);
-
-      if (result.success && result.transcription) {
-        console.log(`📝 WebSocket: Transcription ready [${sessionId}]: "${result.transcription}"`);
-        socket.emit('transcription', { text: result.transcription });
+      const sttData = await sttResponse.json();
+      const transcription = sttData.transcript;
+      
+      if (transcription && transcription.trim()) {
+        console.log(`🎤 Transcribed: ${transcription}`);
         
-        // Generate AI response from transcription
-        await this.generateAIResponseForTranscription(socket, sessionId, result.transcription);
+        // Send transcription to client
+        this.io.to(sessionId).emit('transcription', { text: transcription });
         
-      } else {
-        console.warn(`⚠️ WebSocket: Transcription failed [${sessionId}]: ${result.error}`);
-        socket.emit('error', { message: result.error || 'Transcription failed' });
+        // Process with AI
+        await this.handleTextInput(sessionId, transcription);
       }
-
     } catch (error) {
-      console.error(`❌ WebSocket: Error processing collected audio [${sessionId}]:`, error);
-      socket.emit('error', { message: 'Audio processing failed' });
+      console.error('STT Error:', error);
+      this.io.to(sessionId).emit('error', { message: 'Speech recognition failed' });
     }
   }
 
-  private async generateAIResponseForTranscription(socket: Socket, sessionId: string, transcription: string): Promise<void> {
+  private async handleTextInput(sessionId: string, text: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    session.lastActivity = Date.now();
+
     try {
-      console.log(`🤖 WebSocket: Generating AI response [${sessionId}] for: "${transcription}"`);
+      console.log(`💭 Processing text: ${text}`);
       
-      // Update conversation state
-      socket.emit('conversation_state', { state: 'thinking' });
-
-      // Generate AI response using the same system prompt as HTTP endpoint
-      const systemPrompt = SYSTEM_PROMPTS.HINDI_TEACHER_BASE;
-      const aiResponse = await generateAIResponse(transcription, systemPrompt, true);
+      // Get AI response using the same function as HTTP endpoint
+      const aiResponse = await generateAIResponse(text, SYSTEM_PROMPTS.HINDI_TEACHER_BASE, false);
       
-      if (!('stream' in aiResponse)) {
-        throw new Error('Expected streaming response from AI service');
-      }
-
-      let fullResponse = "";
-      let chunkCount = 0;
-
-      // Handle streaming AI response
-      for await (const chunk of aiResponse.stream) {
-        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-          const text = chunk.delta.text;
-          fullResponse += text;
-          chunkCount++;
-          
-          // Emit AI response chunks
-          socket.emit('ai_response_chunk', { 
-            text, 
-            chunkId: chunkCount,
-            isComplete: false 
-          });
-          
-          // Log occasionally for monitoring
-          if (chunkCount % 10 === 0) {
-            console.log(`📤 WebSocket: AI chunk ${chunkCount} [${sessionId}]: "${text.substring(0, 50)}..."`);
-          }
+      if ('content' in aiResponse && aiResponse.content && aiResponse.content.trim()) {
+        // Send text response to client
+        this.io.to(sessionId).emit('ai_response', { text: aiResponse.content });
+        
+        // Generate TTS using the same function as HTTP endpoint
+        const ttsResult = await generateTTS(aiResponse.content, {
+          languageCode: 'hi-IN',
+          voiceName: 'hi-IN-Wavenet-A',
+          speakingRate: 0.85,
+        });
+        
+        if (ttsResult.audioUrl) {
+          // Send audio URL to client
+          this.io.to(sessionId).emit('audio_response', { audioUrl: ttsResult.audioUrl });
         }
       }
-
-      // Emit completion
-      socket.emit('ai_response_chunk', { 
-        text: '', 
-        chunkId: chunkCount + 1, 
-        isComplete: true 
-      });
-      
-      socket.emit('conversation_state', { state: 'completed' });
-      console.log(`✅ WebSocket: AI response completed [${sessionId}] - ${fullResponse.length} chars, ${chunkCount} chunks`);
-
     } catch (error) {
-      console.error(`❌ WebSocket: AI response generation failed [${sessionId}]:`, error);
-      socket.emit('error', { 
-        message: `AI response failed: ${error instanceof Error ? error.message : 'Unknown error'}` 
-      });
-      socket.emit('conversation_state', { state: 'error' });
+      console.error('AI/TTS Error:', error);
+      this.io.to(sessionId).emit('error', { message: 'AI processing failed' });
     }
   }
 
-  private handleDisconnection(sessionId: string): void {
-    const context = this.sessions.get(sessionId);
-    
-    if (context) {
-      // Cleanup session resources
-      const sessionDuration = Date.now() - context.stats.startTime;
-      console.log(`🧹 WebSocket: Cleaning up session [${sessionId}] - Duration: ${Math.round(sessionDuration/1000)}s, Chunks: ${context.stats.chunksReceived}, Errors: ${context.stats.errors}`);
-
-      // Destroy VAD instance
-      context.vadInstance.destroy().catch(error => {
-        console.error(`❌ WebSocket: Error destroying VAD instance [${sessionId}]:`, error);
-      });
-
-      // Remove from sessions
-      this.sessions.delete(sessionId);
-    }
-
-    this.connectionManager.removeConnection(sessionId);
-  }
-
-  private startHeartbeat(): void {
-    this.heartbeatTimer = setInterval(() => {
+  private startSessionCleanup() {
+    setInterval(() => {
       const now = Date.now();
-      let cleanedSessions = 0;
-
-      // Check for stale sessions
-      for (const [sessionId, context] of this.sessions.entries()) {
-        const timeSinceActivity = now - context.lastActivity;
-        
-        if (timeSinceActivity > this.SESSION_TIMEOUT) {
-          console.log(`⏰ WebSocket: Session timeout [${sessionId}] - ${Math.round(timeSinceActivity/1000)}s idle`);
-          this.handleDisconnection(sessionId);
-          cleanedSessions++;
+      for (const [sessionId, session] of this.sessions.entries()) {
+        if (now - session.lastActivity > this.sessionTimeout) {
+          console.log(`🧹 Cleaning up inactive session: ${sessionId}`);
+          this.sessions.delete(sessionId);
         }
       }
-
-      if (cleanedSessions > 0) {
-        console.log(`🧹 WebSocket: Cleaned up ${cleanedSessions} stale sessions`);
-      }
-
-      // Log server health
-      const activeConnections = this.sessions.size;
-      if (activeConnections > 0) {
-        console.log(`💗 WebSocket: Heartbeat - ${activeConnections} active sessions`);
-      }
-
-    }, this.HEARTBEAT_INTERVAL);
+    }, 60000); // Check every minute
   }
 
-  // Get server statistics
-  getStats() {
-    const activeSessions = this.sessions.size;
-    const connectionStats = this.connectionManager.getConnectionStats();
-    
-    let totalChunks = 0;
-    let totalBytes = 0;
-    let totalErrors = 0;
-
-    for (const context of this.sessions.values()) {
-      totalChunks += context.stats.chunksReceived;
-      totalBytes += context.stats.bytesProcessed;
-      totalErrors += context.stats.errors;
-    }
-
-    return {
-      activeSessions,
-      totalChunksProcessed: totalChunks,
-      totalBytesProcessed: totalBytes,
-      totalErrors,
-      averageBytesPerSession: activeSessions > 0 ? Math.round(totalBytes / activeSessions) : 0,
-      connectionStats
-    };
+  // Public methods for external integration
+  public sendToSession(sessionId: string, event: string, data: any) {
+    this.io.to(sessionId).emit(event, data);
   }
 
-  // Graceful shutdown
-  async shutdown(): Promise<void> {
-    console.log('🔄 WebSocket: Shutting down gracefully...');
-
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-
-    // Close all sessions
-    const sessionPromises = Array.from(this.sessions.keys()).map(sessionId => {
-      return this.handleDisconnection(sessionId);
-    });
-
-    await Promise.all(sessionPromises);
-
-    // Close Socket.IO server
-    this.io.close();
-
-    console.log('✅ WebSocket: Server shutdown complete');
+  public getActiveSessionCount(): number {
+    return this.sessions.size;
   }
 }
