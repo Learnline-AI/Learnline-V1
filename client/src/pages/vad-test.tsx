@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Mic, MicOff, Activity, AlertCircle, CheckCircle, Settings, BarChart3, RefreshCw, Play, Volume2, VolumeX, Wifi, WifiOff } from 'lucide-react';
 import { ChatBubble, TypingIndicator } from '@/components/ChatBubble';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
-import { useAudioWebSocket } from '@/hooks/useAudioWebSocket';
+import { usePipecatWebSocket } from '@/hooks/usePipecatWebSocket';
 import { ChatMessage } from '@/types';
 import { apiService } from '@/lib/apiService';
 
@@ -60,7 +60,6 @@ export default function VADTestPage() {
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [showDebugPanel, setShowDebugPanel] = useState(true);
   const [probabilityHistory, setProbabilityHistory] = useState<number[]>([]);
-  const [providerSwitching, setProviderSwitching] = useState(false);
   
   // Chat functionality state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -88,129 +87,131 @@ export default function VADTestPage() {
   const [currentAIResponse, setCurrentAIResponse] = useState<string>('');
   const [aiResponseComplete, setAiResponseComplete] = useState<boolean>(false);
 
-  // WebSocket integration for real-time audio streaming
+  // Pipecat WebSocket integration for real-time audio streaming
   const {
     connect,
     disconnect,
-    sendAudioChunk,
-    switchVADProvider,
-    requestVADStats,
-    onTranscription,
-    onVADEvent,
-    onConversationState,
-    onAIResponse,
+    sendAudioFrame,
+    requestStats,
+    onConnection,
+    onDisconnection,
+    onError,
+    onStats,
     connectionStatus,
     error,
-    sessionId,
+    sessionInfo,
     stats: wsStats,
-    vadProvider,
-    vadStats,
-    vadConfig,
-    lastVADEvent,
     isConnected,
     isConnecting
-  } = useAudioWebSocket({
+  } = usePipecatWebSocket({
     autoReconnect: true,
     maxReconnectAttempts: 5,
-    audioChunkSize: 4096
+    reconnectInterval: 1000
   });
 
-  // WebSocket event handlers setup
+  // Temporary placeholders for Pipecat migration (will be implemented later)
+  const vadProvider = sessionInfo?.sessionId ? 'pipecat' : 'disconnected';
+  const vadConfig = sessionInfo?.config;
+  const lastVADEvent = null; // Placeholder - VAD events will be implemented later
+  const vadStats = null; // Placeholder - VAD stats will be implemented later
+  const providerSwitching = false;
+
+  // Pipecat WebSocket event handlers setup
   useEffect(() => {
-    // Connect to WebSocket server when component mounts
-    console.log('🔌 Connecting to WebSocket audio server...');
+    // Connect to Pipecat WebSocket server when component mounts
+    console.log('🔌 Connecting to Pipecat WebSocket server...');
     connect();
 
-    // Set up event handlers
-    onVADEvent((event) => {
-      console.log('🎤 VAD Event:', event);
-      
-      // Handle speech events for conversation flow
-      if (event.type === 'speech_start') {
-        // User started speaking - stop AI if it's currently speaking
-        if (isPlaying) {
-          stopAudio();
-          speechSynthesis.cancel();
-        }
-      }
-      
-      // Update probability history for visualization
-      if (event.data.probability !== undefined) {
-        setProbabilityHistory(prev => {
-          const newHistory = [...prev, event.data.probability!].slice(-50); // Keep last 50 values
-          return newHistory;
-        });
-      }
-      
-      // Store debug information
-      if (event.data.debug) {
-        setVadDebugInfo(event.data.debug);
-      }
+    // Set up simplified event handlers for connection management
+    onConnection((sessionId) => {
+      console.log('✅ PipecatClient: Connected with session:', sessionId);
+      setConversationState('idle');
     });
 
-    onConversationState((state) => {
-      console.log('🔄 Conversation state:', state);
-      setConversationState(state as ConversationState);
+    onDisconnection((sessionId) => {
+      console.log('🔌 PipecatClient: Disconnected from session:', sessionId);
+      setConversationState('idle');
     });
 
-    onTranscription((text) => {
-      console.log('📝 Transcription:', text);
-      setTranscription(text);
-      setTranscript(text);
-      
-      // Add user message to chat when transcription is ready
-      if (text && text.trim()) {
-        const userMessage: ChatMessage = {
-          id: Date.now().toString(),
-          text: text.trim(),
-          sender: 'user',
-          timestamp: new Date(),
-          tutorPersonality: tutorPersonality
-        };
-        setMessages(prev => [...prev, userMessage]);
-        
-        // Reset AI response state for new conversation
-        setCurrentAIResponse('');
-        setAiResponseComplete(false);
-        setIsTyping(true);
-      }
+    onError((error) => {
+      console.error('❌ PipecatClient: Error:', error);
+      setConversationState('idle');
     });
 
-    // Handle AI response chunks from WebSocket
-    onAIResponse((chunk) => {
-      console.log('🤖 AI Response chunk:', chunk);
-      
-      if (chunk.isComplete) {
-        // AI response is complete
-        setIsTyping(false);
-        setAiResponseComplete(true);
-        console.log('✅ AI response completed:', currentAIResponse);
-        
-        // Add complete AI message to chat
-        if (currentAIResponse.trim()) {
-          const aiMessage: ChatMessage = {
-            id: Date.now().toString(),
-            text: currentAIResponse.trim(),
-            sender: 'tutor',
-            timestamp: new Date(),
-            tutorPersonality: tutorPersonality
-          };
-          setMessages(prev => [...prev, aiMessage]);
-        }
-        
-        // Reset for next conversation
-        setCurrentAIResponse('');
-      } else {
-        // Accumulate AI response chunks
-        setCurrentAIResponse(prev => prev + chunk.text);
-      }
+    onStats((stats) => {
+      console.log('📊 PipecatClient: Stats received:', stats);
     });
 
     // Cleanup on unmount
     return () => {
       disconnect();
     };
-  }, [connect, disconnect, onVADEvent, onConversationState, onTranscription, onAIResponse, isPlaying, stopAudio, tutorPersonality, currentAIResponse]);
+  }, [connect, disconnect, onConnection, onDisconnection, onError, onStats]);
+
+  // Basic recording functions for Pipecat WebSocket testing
+  const startRecording = async () => {
+    try {
+      setIsRecording(true);
+      setConversationState('listening');
+      console.log('🎤 Started recording for Pipecat WebSocket test');
+      
+      // Get media stream
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+
+      mediaStreamRef.current = stream;
+
+      // Setup audio context for basic audio processing
+      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      
+      // Setup analyzer for visualization
+      analyzerRef.current = audioContextRef.current.createAnalyser();
+      analyzerRef.current.fftSize = 256;
+      const bufferLength = analyzerRef.current.frequencyBinCount;
+      dataArrayRef.current = new Uint8Array(bufferLength);
+      
+      // Connect for visualization
+      source.connect(analyzerRef.current);
+      
+      updateAudioLevel();
+      setConversationStarted(true);
+      
+    } catch (err) {
+      console.error('❌ Failed to start recording:', err);
+      setIsRecording(false);
+      setConversationState('idle');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+
+    setIsRecording(false);
+    setAudioLevel(0);
+    setConversationState('idle');
+    setConversationStarted(false);
+    console.log('🔇 Recording stopped');
+  };
 
   // Audio level monitoring
   const updateAudioLevel = () => {
@@ -485,107 +486,6 @@ export default function VADTestPage() {
     return handleConcurrentTranscription(transcribedText);
   };
 
-  const startRecording = async () => {
-    try {
-      
-      // Enhanced audio constraints with WebRTC voice detection and RNNoise compatibility
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }
-      });
-
-      mediaStreamRef.current = stream;
-
-      // Setup audio context for raw audio processing
-      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      
-      // Setup analyzer for visualization
-      analyzerRef.current = audioContextRef.current.createAnalyser();
-      analyzerRef.current.fftSize = 256;
-      const bufferLength = analyzerRef.current.frequencyBinCount;
-      dataArrayRef.current = new Uint8Array(bufferLength);
-      
-      // Create script processor for raw audio data extraction
-      // Note: ScriptProcessorNode is deprecated but still widely supported
-      // TODO: Replace with AudioWorklet when needed
-      const bufferSize = 4096; // Process in chunks of 4096 samples
-      processorRef.current = audioContextRef.current.createScriptProcessor(bufferSize, 1, 1);
-      
-      processorRef.current.onaudioprocess = (event) => {
-        try {
-          if (!isConnected) {
-            return;
-          }
-
-          const inputBuffer = event.inputBuffer;
-          const inputData = inputBuffer.getChannelData(0);
-          
-          // Convert Float32Array to 16-bit PCM
-          const pcmData = new Int16Array(inputData.length);
-          for (let i = 0; i < inputData.length; i++) {
-            pcmData[i] = Math.max(-32768, Math.min(32767, Math.floor(inputData[i] * 32768)));
-          }
-          
-          // Send binary audio chunk via WebSocket
-          const audioBuffer = pcmData.buffer;
-          const success = sendAudioChunk(audioBuffer, Date.now());
-          
-          if (!success) {
-            console.warn('⚠️ Failed to send audio chunk via WebSocket');
-          }
-        } catch (error) {
-          console.error('❌ Error processing audio chunk:', error);
-        }
-      };
-
-      // Connect the audio pipeline: source -> analyzer (for visualization)
-      source.connect(analyzerRef.current);
-      
-      // Connect source -> processor (for raw audio data) -> destination (to prevent garbage collection)
-      source.connect(processorRef.current);
-      processorRef.current.connect(audioContextRef.current.destination);
-      
-      updateAudioLevel();
-      setIsRecording(true);
-      setConversationStarted(true);
-      console.log('🎤 Recording started with enhanced VAD pipeline');
-
-    } catch (err) {
-      console.error('❌ Failed to start recording:', err);
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
-      mediaStreamRef.current = null;
-    }
-
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-    }
-
-    setIsRecording(false);
-    setAudioLevel(0);
-    setConversationStarted(false);
-    console.log('🔇 Recording stopped');
-  };
 
   const getStateColor = (state: ConversationState | undefined) => {
     switch (state) {
@@ -608,14 +508,9 @@ export default function VADTestPage() {
     }
   };
   
+  // Simplified for Pipecat WebSocket testing - no VAD provider switching
   const handleVADProviderSwitch = (newProvider: 'silero' | 'custom') => {
-    if (isConnected && vadProvider !== newProvider) {
-      setProviderSwitching(true);
-      switchVADProvider(newProvider);
-      
-      // Reset switching state after a delay
-      setTimeout(() => setProviderSwitching(false), 2000);
-    }
+    console.log('Provider switching not implemented in Pipecat transport yet:', newProvider);
   };
   
   // Start conversation (copied from chat page)
@@ -624,9 +519,9 @@ export default function VADTestPage() {
     await startRecording();
   };
   
-  const refreshVADStats = () => {
+  const refreshStats = () => {
     if (isConnected) {
-      requestVADStats();
+      requestStats();
     }
   };
   
@@ -719,7 +614,7 @@ export default function VADTestPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={refreshVADStats}
+                  onClick={refreshStats}
                   disabled={!isConnected}
                   className="text-xs"
                 >

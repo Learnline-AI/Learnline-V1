@@ -10,7 +10,7 @@ import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { ChatMessage, UserSettings } from '@/types';
 import { apiService } from '@/lib/apiService';
 import { storage, STORAGE_KEYS } from '@/lib/storage';
-import { io, Socket } from 'socket.io-client';
+import { usePipecatWebSocket } from '@/hooks/usePipecatWebSocket';
 
 type ConversationState = 'idle' | 'listening' | 'processing' | 'speaking';
 
@@ -96,6 +96,13 @@ export default function ChatWithSileroVAD({ onShowSettings, onShowProfile }: Cha
   const conversationStartedRef = useRef<boolean>(false);
   
   const { isPlaying, currentAudio, playAudio, stopAudio } = useAudioPlayback();
+
+  // Pipecat WebSocket integration (basic setup for testing)
+  const pipecatWebSocket = usePipecatWebSocket({
+    autoReconnect: true,
+    maxReconnectAttempts: 5,
+    reconnectInterval: 1000
+  });
 
   // Enhanced conversational AI system prompt
   const getConversationalPrompt = (question: string, isFirstMessage: boolean = false) => {
