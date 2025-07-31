@@ -8,7 +8,7 @@ import { generateTTS, detectLanguage } from "./services/ttsService";
 import { AI_CONFIG, SYSTEM_PROMPTS, API_KEYS } from "./config/aiConfig";
 import { getRNNoiseService } from "./services/rnnoiseService";
 import { getErrorMonitoringService } from "./services/errorMonitoring";
-import { ConversationVAD, createVADInstance, getOptimalVADConfig, type VADEvent, type ConversationState } from "./services/vadService";
+// VAD imports removed - now handled by unified pipeline
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -24,14 +24,37 @@ const sessionCleanupTimeouts = new Map<string, NodeJS.Timeout>();
 const generateSessionId = () => Math.random().toString(36).substring(2, 15);
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Health check endpoint
-  app.get("/api/health", (req, res) => {
-    res.json({ 
-      status: "OK", 
-      timestamp: new Date().toISOString(),
-      aiProvider: AI_CONFIG.AI_PROVIDER,
-      ttsProvider: AI_CONFIG.TTS_PROVIDER,
-    });
+  // Health check endpoint with unified pipeline status
+  app.get("/api/health", async (req, res) => {
+    try {
+      const { getUnifiedAudioPipeline } = await import('./services/unifiedAudioPipeline');
+      const pipeline = getUnifiedAudioPipeline();
+      const pipelineStats = pipeline.getAllStats();
+      
+      res.json({ 
+        status: "OK", 
+        timestamp: new Date().toISOString(),
+        aiProvider: AI_CONFIG.AI_PROVIDER,
+        ttsProvider: AI_CONFIG.TTS_PROVIDER,
+        unifiedPipeline: {
+          activeSessions: pipelineStats.activeSessions,
+          totalChunks: pipelineStats.totalChunks,
+          successRate: pipelineStats.successRate,
+          enabled: true
+        }
+      });
+    } catch (error) {
+      res.json({ 
+        status: "OK", 
+        timestamp: new Date().toISOString(),
+        aiProvider: AI_CONFIG.AI_PROVIDER,
+        ttsProvider: AI_CONFIG.TTS_PROVIDER,
+        unifiedPipeline: {
+          enabled: false,
+          error: error instanceof Error ? error.message : 'Pipeline unavailable'
+        }
+      });
+    }
   });
 
   // RNNoise system health endpoint
@@ -134,7 +157,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Additional useful info
       configuredAI: AI_CONFIG.AI_PROVIDER,
       configuredTTS: AI_CONFIG.TTS_PROVIDER,
-      availableProviders: AI_CONFIG.availableProviders,
+      configuredFallbacks: { ai: AI_CONFIG.AI_FALLBACK, tts: AI_CONFIG.TTS_FALLBACK },
       workingDirectory: process.cwd(),
       nodeVersion: process.version,
     };
@@ -1246,313 +1269,133 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   const httpServer = createServer(app);
   
-  // 🎤 Setup Socket.IO for VAD audio streaming
+  // 🎤 PIPECAT-INSPIRED: Single WebSocket transport with unified session management
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: "*", // Configure properly for production
-      methods: ["GET", "POST"]
+      origin: true,
+      credentials: true
     },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    maxHttpBufferSize: 1e7, // 10MB for audio chunks
+    allowEIO3: true
   });
 
-  // Store active VAD sessions
-  const vadSessions = new Map<string, ConversationVAD>();
+  // PIPECAT-INSPIRED: Import unified pipeline
+  const { getUnifiedAudioPipeline } = await import('./services/unifiedAudioPipeline');
+  const unifiedPipeline = getUnifiedAudioPipeline();
 
   io.on("connection", async (socket) => {
-    console.log(`🔌 Client connected: ${socket.id}`);
+    console.log(`🔌 WebSocket: Client connected [${socket.id}]`);
     
-    // Initialize enhanced VAD with Silero ONNX + Custom fallback
-    const vadConfig = getOptimalVADConfig({
-      language: 'mixed',
-      environment: 'variable', 
-      sensitivity: 'medium'
-    });
-    
-    const vad = createVADInstance({
-      ...vadConfig,
-      sampleRate: 16000,
-      provider: 'auto', // Auto-select between Silero and Custom
-      customVADEnabled: true // Keep custom VAD as fallback
-    });
-    
-    // Initialize the VAD service (this will try Silero first, fallback to Custom)
     try {
-      await vad.initialize();
-      console.log(`✅ VAD initialized for ${socket.id} with provider: ${vad.getCurrentProvider()}`);
-    } catch (error) {
-      console.error(`❌ VAD initialization failed for ${socket.id}:`, error);
-      socket.emit('error', { message: 'VAD initialization failed' });
-      return;
-    }
-
-    vadSessions.set(socket.id, vad);
-
-    // Setup VAD event handlers
-    vad.on('speech_start', (event: VADEvent) => {
-      console.log(`🎤 Speech started for ${socket.id}`);
-      socket.emit('vad_event', { type: 'speech_start', data: event.data });
-    });
-
-    vad.on('speech_end', (event: VADEvent) => {
-      console.log(`🔇 Speech ended for ${socket.id}`);
-      const audioData = vad.getCollectedAudio();
+      // Create unified processing session
+      await unifiedPipeline.createSession(socket.id);
       
-      // Send collected audio for processing
-      socket.emit('vad_event', { 
-        type: 'speech_end', 
-        data: { ...event.data, audioBuffer: audioData.toString('base64') }
-      });
-
-      // Process the speech with existing AI pipeline
-      processCollectedSpeech(audioData, socket, vad);
-      
-      // Clear buffer for next speech segment
-      vad.clearBuffer();
-    });
-
-    vad.on('state_change', (event: VADEvent) => {
-      console.log(`🔄 State changed for ${socket.id}: ${event.data.state}`);
-      socket.emit('conversation_state', { state: event.data.state });
-    });
-
-    // Handle incoming audio chunks
-    socket.on('audio_chunk', async (data: { audioData: string; timestamp: number; size: number; samples?: number; format?: string }) => {
-      try {
-        console.log(`📥 Received ${data.format || 'unknown'} audio chunk for ${socket.id}: ${data.samples || 'unknown'} samples, ${data.size} bytes`);
-        
-        // Convert base64 string back to Buffer
-        const audioBuffer = Buffer.from(data.audioData, 'base64');
-        
-        console.log(`🔊 Processing audio buffer: ${audioBuffer.length} bytes`);
-        
-        const result = await vad.processAudioChunk(audioBuffer);
-        if (result) {
-          console.log(`✅ VAD event generated: ${result.type}, probability: ${result.data.probability?.toFixed(3)}`);
-          // VAD event was triggered, already handled by event listeners above
-        }
-      } catch (error) {
-        console.error(`❌ Error processing audio for ${socket.id}:`, error);
-        socket.emit('error', { message: 'Audio processing failed' });
-      }
-    });
-
-    // Handle manual state changes
-    socket.on('set_conversation_state', (data: { state: ConversationState }) => {
-      console.log(`🎯 Manual state change for ${socket.id}: ${data.state}`);
-      vad.setConversationState(data.state);
-    });
-
-    // Handle VAD provider switching
-    socket.on('switch_vad_provider', async (data: { provider: 'silero' | 'custom' }) => {
-      try {
-        console.log(`🔄 Switching VAD provider for ${socket.id}: ${data.provider}`);
-        const success = await vad.switchProvider(data.provider);
-        socket.emit('vad_provider_switched', { 
-          success, 
-          provider: vad.getCurrentProvider(),
-          stats: vad.getVADStats()
-        });
-      } catch (error) {
-        console.error(`❌ Failed to switch VAD provider for ${socket.id}:`, error);
-        socket.emit('error', { message: 'Failed to switch VAD provider' });
-      }
-    });
-
-    // Handle VAD stats request
-    socket.on('get_vad_stats', () => {
-      socket.emit('vad_stats', {
-        stats: vad.getVADStats(),
-        provider: vad.getCurrentProvider(),
-        state: vad.getCurrentState()
-      });
-    });
-
-    // Handle VAD session reset (clears LSTM states)
-    socket.on('reset_vad_session', () => {
-      try {
-        vad.resetSession();
-        socket.emit('vad_session_reset', { 
-          success: true,
-          timestamp: Date.now()
-        });
-        console.log(`🔄 VAD session reset for ${socket.id}`);
-      } catch (error) {
-        console.error(`❌ Failed to reset VAD session for ${socket.id}:`, error);
-        socket.emit('error', { message: 'Failed to reset VAD session' });
-      }
-    });
-
-    // Handle disconnection
-    socket.on("disconnect", async () => {
-      console.log(`🔌 Client disconnected: ${socket.id}`);
-      const vadInstance = vadSessions.get(socket.id);
-      if (vadInstance) {
-        await vadInstance.destroy();
-        vadSessions.delete(socket.id);
-      }
-    });
-
-    // Send initial connection confirmation with enhanced VAD info
-    socket.emit('connected', { 
-      sessionId: socket.id, 
-      vadProvider: vad.getCurrentProvider(),
-      vadStats: vad.getVADStats(),
-      vadConfig: {
-        sampleRate: 16000,
-        model: "v5",
-        provider: vad.getCurrentProvider(),
-        positiveSpeechThreshold: 0.5,
-        negativeSpeechThreshold: 0.35,
-        minSpeechDuration: 1000,
-        minSilenceDuration: 800,
-        sileroReady: vad.getVADStats().sileroReady
-      }
-    });
-  });
-
-  // Function to process collected speech through existing AI pipeline
-  async function processCollectedSpeech(audioData: Buffer, socket: any, vad: ConversationVAD) {
-    try {
-      // Set state to processing
-      vad.setConversationState('processing');
-
-      // Convert audio to the format expected by speech-to-text
-      const tempDir = os.tmpdir();
-      const tempAudioPath = path.join(tempDir, `speech_${Date.now()}.wav`);
-      
-      // Write audio buffer to temporary file
-      fs.writeFileSync(tempAudioPath, audioData);
-
-      // Convert to base64 for existing STT pipeline
-      const base64Audio = fs.readFileSync(tempAudioPath, { encoding: 'base64' });
-      
-      // Clean up temp file
-      fs.unlinkSync(tempAudioPath);
-
-      // Use existing speech-to-text processing logic
-      // (This integrates with the existing /api/speech-to-text logic)
-      const sttResult = await processSTT(base64Audio);
-      
-      if (sttResult.success && sttResult.transcript) {
-        console.log(`📝 Transcribed: ${sttResult.transcript}`);
-        socket.emit('transcription', { text: sttResult.transcript });
-
-        // Process with AI teacher (using existing streaming logic)
-        await processAITeacher(sttResult.transcript, socket, vad);
-      } else {
-        socket.emit('error', { message: 'Speech recognition failed' });
-        vad.setConversationState('idle');
-      }
-
-    } catch (error) {
-      console.error('❌ Error processing collected speech:', error);
-      socket.emit('error', { message: 'Speech processing failed' });
-      vad.setConversationState('idle');
-    }
-  }
-
-  // Function to process AI response using existing streaming logic
-  async function processAITeacher(question: string, socket: any, vad: ConversationVAD) {
-    try {
-      vad.setConversationState('speaking');
-      
-      const sessionId = generateSessionId();
-      let fullResponse = '';
-      
-      // Use existing AI streaming logic
-      const aiResponse = await generateAIResponse(question, SYSTEM_PROMPTS.HINDI_TEACHER_BASE, true);
-      
-      if (!('stream' in aiResponse)) {
-        throw new Error('Expected streaming response');
-      }
-
-      for await (const chunk of aiResponse.stream) {
-        fullResponse += chunk;
-        socket.emit('ai_response_chunk', { text: chunk });
-        
-        // Generate TTS for chunk (using existing TTS logic)
-        try {
-          const ttsResult = await generateTTS(chunk, { languageCode: 'hi-IN' });
-          if (ttsResult.audioUrl) {
-            socket.emit('tts_chunk', { 
-              text: chunk,
-              audioUrl: ttsResult.audioUrl
-            });
+      // Setup pipeline event handlers
+      const handleProcessingComplete = (data: any) => {
+        if (data.sessionId === socket.id) {
+          const { result } = data;
+          
+          if (result.transcription) {
+            socket.emit('transcription', { text: result.transcription });
           }
-        } catch (ttsError) {
-          console.error('TTS generation failed for chunk:', ttsError);
+          
+          if (result.aiResponse) {
+            socket.emit('ai_response_complete', { text: result.aiResponse });
+          }
+          
+          if (result.audioResponse) {
+            socket.emit('tts_audio', { audioUrl: result.audioResponse });
+          }
+          
+          socket.emit('conversation_state', { state: 'completed' });
         }
-      }
-
-      socket.emit('ai_response_complete', { fullText: fullResponse });
-      vad.setConversationState('idle'); // Ready for next conversation
-
-    } catch (error) {
-      console.error('❌ Error processing AI response:', error);
-      socket.emit('error', { message: 'AI processing failed' });
-      vad.setConversationState('idle');
-    }
-  }
-
-  // STT processing using existing speech-to-text logic
-  async function processSTT(base64Audio: string) {
-    try {
-      // Use the existing Google Speech-to-Text integration
-      const apiKey = process.env.GOOGLE_CLOUD_SPEECH_API_KEY || process.env.GOOGLE_CLOUD_TTS_API_KEY;
-
-      // Call Google Speech-to-Text API directly (same logic as /api/speech-to-text)
-      const sttResponse = await fetch(
-        `https://speech.googleapis.com/v1/speech:recognize?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            config: {
-              encoding: "LINEAR16", // Assuming we converted to WAV
-              sampleRateHertz: 16000, // VAD uses 16kHz
-              languageCode: "hi-IN", // Hindi for our education app
-            },
-            audio: { content: base64Audio },
-          }),
-        }
-      );
-
-      if (!sttResponse.ok) {
-        const errorData = await sttResponse.json().catch(() => ({}));
-        throw new Error(`Google STT API error: ${sttResponse.status} - ${errorData.error?.message || 'Unknown error'}`);
-      }
-
-      const sttData = await sttResponse.json();
-      
-      if (!sttData.results || sttData.results.length === 0) {
-        return {
-          success: false,
-          transcript: null,
-          error: "No speech detected"
-        };
-      }
-
-      const transcript = sttData.results
-        .map((result: any) => result.alternatives?.[0]?.transcript)
-        .filter(Boolean)
-        .join(" ");
-
-      console.log('🎤 STT Result:', transcript);
-      
-      return {
-        success: true,
-        transcript: transcript || null
       };
 
-    } catch (error) {
-      console.error('❌ STT processing failed:', error);
-      return {
-        success: false,
-        transcript: null,
-        error: error instanceof Error ? error.message : 'STT processing failed'
+      const handleProcessingError = (data: any) => {
+        if (data.sessionId === socket.id) {
+          socket.emit('error', { message: data.error, steps: data.processingSteps });
+          socket.emit('conversation_state', { state: 'error' });
+        }
       };
+
+      // Subscribe to pipeline events
+      unifiedPipeline.on('processing_complete', handleProcessingComplete);
+      unifiedPipeline.on('processing_error', handleProcessingError);
+
+      // Handle incoming audio chunks
+      socket.on('audio_chunk', async (data: { audioData: string; timestamp: number; size: number; samples?: number; format?: string }) => {
+        try {
+          console.log(`📥 WebSocket: Received ${data.format || 'pcm16'} audio chunk [${socket.id}]: ${data.samples || 'unknown'} samples, ${data.size} bytes`);
+          
+          const audioChunk = {
+            data: Buffer.from(data.audioData, 'base64'),
+            timestamp: data.timestamp,
+            sessionId: socket.id,
+            format: (data.format as 'pcm16' | 'float32') || 'pcm16',
+            sampleRate: 16000
+          };
+          
+          socket.emit('conversation_state', { state: 'listening' });
+          
+          // Process through unified pipeline
+          const result = await unifiedPipeline.processAudioChunk(socket.id, audioChunk);
+          
+          if (!result.success && result.error) {
+            socket.emit('error', { message: result.error, steps: result.processingSteps });
+          }
+          
+        } catch (error) {
+          console.error(`❌ WebSocket: Error processing audio [${socket.id}]:`, error);
+          socket.emit('error', { message: 'Audio processing failed' });
+        }
+      });
+
+      // Handle stats request
+      socket.on('get_stats', () => {
+        const sessionStats = unifiedPipeline.getSessionStats(socket.id);
+        const globalStats = unifiedPipeline.getAllStats();
+        
+        socket.emit('stats', {
+          session: sessionStats,
+          global: globalStats
+        });
+      });
+
+      // Handle disconnection
+      socket.on('disconnect', async (reason) => {
+        console.log(`🔌 WebSocket: Client disconnected [${socket.id}] - Reason: ${reason}`);
+        
+        // Cleanup pipeline event listeners
+        unifiedPipeline.off('processing_complete', handleProcessingComplete);
+        unifiedPipeline.off('processing_error', handleProcessingError);
+        
+        // Destroy session
+        await unifiedPipeline.destroySession(socket.id);
+      });
+
+      // Send initial connection confirmation
+      socket.emit('connected', { 
+        sessionId: socket.id,
+        pipelineReady: true,
+        voiceIsolationEnabled: true,
+        features: ['voice_isolation', 'vad', 'stt', 'ai', 'tts'],
+        config: {
+          sampleRate: 16000,
+          format: 'pcm16',
+          maxChunkSize: 1024 * 1024, // 1MB
+          supportedFormats: ['pcm16', 'float32']
+        }
+      });
+      
+    } catch (error) {
+      console.error(`❌ WebSocket: Failed to create session [${socket.id}]:`, error);
+      socket.emit('error', { message: 'Failed to initialize session' });
+      socket.disconnect();
     }
-  }
+  });
   
   return httpServer;
 }
